@@ -307,6 +307,208 @@ class ShopifyFlagSyncer:
             print(f"   ⚠️  Klaviyo list add error: {e}")
             return False
 
+    def subscribe_to_klaviyo_marketing(self, email: str, phone: str = None) -> bool:
+        """
+        Subscribe a customer to email and SMS marketing in Klaviyo.
+
+        Args:
+            email: Customer email address (required)
+            phone: Customer phone number (optional, for SMS)
+
+        Returns:
+            True if successful
+        """
+        if not self.klaviyo_headers:
+            return False
+
+        if not email or pd.isna(email):
+            return False
+
+        email = str(email).strip()
+
+        try:
+            # Subscribe to email
+            email_payload = {
+                "data": {
+                    "type": "profile-subscription-bulk-create-job",
+                    "attributes": {
+                        "profiles": {
+                            "data": [
+                                {
+                                    "type": "profile",
+                                    "attributes": {
+                                        "email": email,
+                                        "subscriptions": {
+                                            "email": {
+                                                "marketing": {
+                                                    "consent": "SUBSCRIBED"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+
+            response = requests.post(
+                "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs",
+                headers=self.klaviyo_headers,
+                json=email_payload,
+                timeout=30
+            )
+
+            if response.status_code in [200, 201, 202, 204]:
+                print(f"   ✅ Subscribed {email} to email marketing")
+            else:
+                print(f"   ⚠️  Email subscription failed ({response.status_code})")
+
+            # Subscribe to SMS if phone provided
+            if phone and pd.notna(phone):
+                phone_str = str(phone).strip()
+                # Normalize phone - ensure it starts with +1 for US
+                if not phone_str.startswith('+'):
+                    phone_str = '+1' + ''.join(c for c in phone_str if c.isdigit())
+
+                sms_payload = {
+                    "data": {
+                        "type": "profile-subscription-bulk-create-job",
+                        "attributes": {
+                            "profiles": {
+                                "data": [
+                                    {
+                                        "type": "profile",
+                                        "attributes": {
+                                            "email": email,
+                                            "phone_number": phone_str,
+                                            "subscriptions": {
+                                                "sms": {
+                                                    "marketing": {
+                                                        "consent": "SUBSCRIBED"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+
+                sms_response = requests.post(
+                    "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs",
+                    headers=self.klaviyo_headers,
+                    json=sms_payload,
+                    timeout=30
+                )
+
+                if sms_response.status_code in [200, 201, 202, 204]:
+                    print(f"   ✅ Subscribed {phone_str} to SMS marketing")
+                    # Record SMS consent to Twilio tracker
+                    self.record_sms_consent(
+                        phone=phone_str,
+                        email=email,
+                        opt_in_method='tag_sync_auto_subscribe'
+                    )
+                else:
+                    print(f"   ⚠️  SMS subscription failed ({sms_response.status_code})")
+
+            return True
+
+        except Exception as e:
+            print(f"   ⚠️  Klaviyo subscription error: {e}")
+            return False
+
+    def record_sms_consent(
+        self,
+        phone: str,
+        email: str = None,
+        opt_in_method: str = 'tag_sync_auto_subscribe',
+        customer_id: str = None
+    ):
+        """
+        Record SMS consent to the Twilio tracker (sms_consents.csv).
+
+        This maintains Twilio as the source of truth for all SMS consent.
+
+        Args:
+            phone: Phone number (E.164 format preferred)
+            email: Customer email (optional)
+            opt_in_method: How consent was obtained
+            customer_id: Capitan customer ID (optional)
+        """
+        import hashlib
+
+        # Normalize phone
+        phone_normalized = phone
+        if not phone_normalized.startswith('+'):
+            phone_normalized = '+1' + ''.join(c for c in phone_normalized if c.isdigit())
+
+        timestamp = datetime.utcnow().isoformat() + 'Z'
+
+        # Generate consent ID
+        consent_id = hashlib.md5(
+            f"{phone_normalized}:{timestamp}:{opt_in_method}".encode()
+        ).hexdigest()
+
+        new_record = {
+            'consent_id': consent_id,
+            'timestamp': timestamp,
+            'phone_number': phone_normalized,
+            'opt_in_method': opt_in_method,
+            'consent_message': f'SMS consent via {opt_in_method}',
+            'customer_id': customer_id or '',
+            'customer_name': '',
+            'customer_email': email or '',
+            'ip_address': '',
+            'screenshot_url': '',
+            'metadata': json.dumps({'source': 'sync_flags_to_shopify'}),
+            'status': 'active',
+            'revoked_at': '',
+            'revoked_method': ''
+        }
+
+        try:
+            consent_key = 'twilio/sms_consents.csv'
+
+            # Load existing consents
+            try:
+                obj = self.s3_client.get_object(
+                    Bucket=self.bucket_name,
+                    Key=consent_key
+                )
+                df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            except self.s3_client.exceptions.NoSuchKey:
+                df = pd.DataFrame(columns=list(new_record.keys()))
+
+            # Check if phone already has active consent
+            phone_digits = ''.join(c for c in phone_normalized if c.isdigit())
+            existing = df[df['phone_number'].apply(
+                lambda x: ''.join(c for c in str(x) if c.isdigit()) == phone_digits
+            )]
+            if not existing.empty and (existing['status'] == 'active').any():
+                # Already has active consent, skip
+                return
+
+            # Append new record
+            new_df = pd.DataFrame([new_record])
+            df = pd.concat([df, new_df], ignore_index=True)
+
+            # Save back to S3
+            csv_buffer = StringIO()
+            df.to_csv(csv_buffer, index=False)
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=consent_key,
+                Body=csv_buffer.getvalue()
+            )
+
+        except Exception as e:
+            print(f"   ⚠️  Failed to record SMS consent: {e}")
+
     def _rate_limit(self):
         """
         Enforce rate limiting to stay under Shopify's 2 calls/second limit.
@@ -1027,6 +1229,12 @@ class ShopifyFlagSyncer:
                                     email=str(email),
                                     list_id=klaviyo_list_id,
                                     flag_name=flag_name
+                                )
+
+                                # Subscribe to email and SMS marketing
+                                self.subscribe_to_klaviyo_marketing(
+                                    email=str(email),
+                                    phone=str(phone) if phone and pd.notna(phone) else None
                                 )
                     else:
                         errors += 1

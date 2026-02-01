@@ -168,6 +168,7 @@ class ShopifyDataFetcher:
                     "customer_email": order.get("email"),
                     "customer_first_name": order.get("customer", {}).get("first_name") if order.get("customer") else None,
                     "customer_last_name": order.get("customer", {}).get("last_name") if order.get("customer") else None,
+                    "buyer_accepts_marketing": order.get("buyer_accepts_marketing", False),
 
                     # Line item details
                     "line_item_id": item.get("id"),

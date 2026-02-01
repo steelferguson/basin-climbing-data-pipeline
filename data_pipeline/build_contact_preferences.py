@@ -6,9 +6,11 @@ Aggregates opt-in/opt-out data from all sources into:
 2. Current status table (customer_contact_preferences.csv)
 
 Sources:
-- Capitan: has_opted_in_to_marketing (general marketing)
+- Capitan: has_opted_in_to_marketing (general marketing - email + SMS)
 - Mailchimp: subscription status (email)
-- Twilio: SMS consent records and message opt-ins/opt-outs
+- Twilio: SMS consent records and message opt-ins/opt-outs (includes Klaviyo synced)
+- Shopify: buyer_accepts_marketing at checkout (email)
+- Waiver: active_waiver_exists treated as email opt-in (inferred consent)
 """
 
 import pandas as pd
@@ -316,6 +318,130 @@ class ContactPreferencesBuilder:
         print(f"   Total Twilio records: {len(df_records)}")
         return df_records
 
+    def process_shopify_opt_ins(self) -> pd.DataFrame:
+        """
+        Process Shopify checkout email opt-ins.
+
+        Captures customers who checked "email me with news" at checkout.
+        Uses buyer_accepts_marketing from orders.
+
+        Returns:
+            DataFrame with opt-in records
+        """
+        print("\n🛒 Processing Shopify checkout opt-ins...")
+
+        df = self._load_s3_csv('shopify/orders.csv')
+        if df.empty:
+            return pd.DataFrame()
+
+        records = []
+        seen_emails = set()
+
+        for _, row in df.iterrows():
+            email = row.get('customer_email', '')
+            accepts_marketing = row.get('buyer_accepts_marketing', False)
+            order_date = row.get('created_at', '')
+
+            if not email or pd.isna(email):
+                continue
+
+            email = str(email).lower().strip()
+
+            # Only process if opted in and not already seen
+            if accepts_marketing and email not in seen_emails:
+                seen_emails.add(email)
+
+                records.append({
+                    'identifier': email,
+                    'identifier_type': 'email',
+                    'channel': 'email',
+                    'opt_in_status': 'opted_in',
+                    'opt_in_date': order_date,
+                    'source': 'shopify_checkout',
+                    'source_status': 'buyer_accepts_marketing=True',
+                    'customer_id': str(row.get('customer_id', ''))
+                })
+
+                self.opt_in_events.append({
+                    'customer_id': str(row.get('customer_id', '')),
+                    'event_type': 'email_opt_in',
+                    'event_date': order_date,
+                    'event_source': 'shopify',
+                    'source_confidence': 'direct',
+                    'event_details': json.dumps({
+                        'channel': 'email',
+                        'method': 'shopify_checkout_opt_in',
+                        'email': email
+                    })
+                })
+
+        df_records = pd.DataFrame(records)
+        print(f"   Found {len(df_records)} Shopify checkout opt-ins")
+        return df_records
+
+    def process_waiver_opt_ins(self) -> pd.DataFrame:
+        """
+        Process waiver sign-ups as email opt-ins.
+
+        If someone fills out a waiver, they are considered opted in to email
+        since they've provided their email and engaged with the business.
+
+        Returns:
+            DataFrame with opt-in records
+        """
+        print("\n📋 Processing waiver sign-ups as email opt-ins...")
+
+        df = self._load_s3_csv('capitan/customers.csv')
+        if df.empty:
+            return pd.DataFrame()
+
+        records = []
+
+        for _, row in df.iterrows():
+            has_waiver = row.get('active_waiver_exists', False)
+            email = row.get('email', '')
+            waiver_expiration = row.get('latest_waiver_expiration_date', '')
+            created_at = row.get('created_at', '')
+            customer_id = str(row.get('customer_id', ''))
+
+            if not has_waiver or not email or pd.isna(email):
+                continue
+
+            email = str(email).lower().strip()
+
+            # Use waiver date or created_at as opt-in date
+            # Waivers are typically valid for 1 year, so estimate sign date
+            opt_in_date = created_at  # Use customer created date as proxy
+
+            records.append({
+                'identifier': email,
+                'identifier_type': 'email',
+                'channel': 'email',
+                'opt_in_status': 'opted_in',
+                'opt_in_date': opt_in_date,
+                'source': 'waiver',
+                'source_status': 'active_waiver_exists=True',
+                'customer_id': customer_id
+            })
+
+            self.opt_in_events.append({
+                'customer_id': customer_id,
+                'event_type': 'email_opt_in',
+                'event_date': opt_in_date,
+                'event_source': 'waiver',
+                'source_confidence': 'inferred',
+                'event_details': json.dumps({
+                    'channel': 'email',
+                    'method': 'waiver_signup',
+                    'email': email,
+                    'waiver_expiration': waiver_expiration
+                })
+            })
+
+        df_records = pd.DataFrame(records)
+        print(f"   Found {len(df_records)} waiver-based email opt-ins")
+        return df_records
+
     def build_current_preferences(self, all_records: pd.DataFrame) -> pd.DataFrame:
         """
         Build current contact preferences by taking the most recent status per identifier/channel.
@@ -403,12 +529,16 @@ class ContactPreferencesBuilder:
         capitan_records = self.process_capitan_opt_ins()
         mailchimp_records = self.process_mailchimp_opt_ins()
         twilio_records = self.process_twilio_opt_ins()
+        shopify_records = self.process_shopify_opt_ins()
+        waiver_records = self.process_waiver_opt_ins()
 
         # Combine all records
         all_records = pd.concat([
             capitan_records,
             mailchimp_records,
-            twilio_records
+            twilio_records,
+            shopify_records,
+            waiver_records
         ], ignore_index=True)
 
         print(f"\n📊 Total opt-in records: {len(all_records)}")
