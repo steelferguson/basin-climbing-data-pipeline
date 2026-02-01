@@ -219,9 +219,17 @@ class KlaviyoSmsConsentSync:
         existing_df = self.load_existing_consents()
 
         # Track existing phone numbers to avoid duplicates
+        # Normalize to digits only for comparison
+        def normalize_phone(phone):
+            if pd.isna(phone):
+                return None
+            return ''.join(c for c in str(phone) if c.isdigit())
+
         existing_phones = set()
         if not existing_df.empty and 'phone_number' in existing_df.columns:
-            existing_phones = set(existing_df['phone_number'].dropna().astype(str))
+            existing_phones = set(
+                normalize_phone(p) for p in existing_df['phone_number'].dropna()
+            )
 
         # Build new consent records
         now = datetime.utcnow().isoformat() + 'Z'
@@ -231,9 +239,10 @@ class KlaviyoSmsConsentSync:
 
         for kc in klaviyo_consents:
             phone = kc['phone_number']
+            phone_normalized = normalize_phone(phone)
 
-            # Check if already exists
-            if phone in existing_phones:
+            # Check if already exists (compare normalized)
+            if phone_normalized in existing_phones:
                 skipped_count += 1
                 continue
 
