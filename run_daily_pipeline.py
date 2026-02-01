@@ -275,8 +275,18 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error syncing Twilio opt-ins: {e}\n")
 
-    # 11b. Build unified contact preferences (email + SMS opt-in from all sources)
-    print("13b. Building contact preferences (Capitan + Mailchimp + Twilio)...")
+    # 11b. Sync Klaviyo SMS consent to Twilio tracker (source of truth)
+    print("13b. Syncing Klaviyo SMS consent to Twilio tracker...")
+    try:
+        from data_pipeline.sync_klaviyo_sms_consent import KlaviyoSmsConsentSync
+        klaviyo_consent_sync = KlaviyoSmsConsentSync()
+        klaviyo_consent_sync.sync(dry_run=False)
+        print("✅ Klaviyo SMS consent synced to Twilio tracker\n")
+    except Exception as e:
+        print(f"❌ Error syncing Klaviyo SMS consent: {e}\n")
+
+    # 11c. Build unified contact preferences (email + SMS opt-in from all sources)
+    print("13c. Building contact preferences (Capitan + Mailchimp + Twilio + Klaviyo)...")
     try:
         from data_pipeline.build_contact_preferences import build_contact_preferences
         preferences, events = build_contact_preferences(save_to_s3=True)
