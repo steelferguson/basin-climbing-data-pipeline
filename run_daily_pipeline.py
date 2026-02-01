@@ -361,6 +361,15 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error fetching from Klaviyo: {e}\n")
 
+    # 18a. Fetch Klaviyo message activity (emails/SMS sent, opens, clicks)
+    print("20a. Fetching Klaviyo message activity (last 30 days)...")
+    try:
+        from data_pipeline.fetch_klaviyo_activity import fetch_klaviyo_activity
+        activity_df = fetch_klaviyo_activity(days_back=30, save_to_s3=True)
+        print(f"✅ Fetched {len(activity_df)} Klaviyo message events\n")
+    except Exception as e:
+        print(f"❌ Error fetching Klaviyo activity: {e}\n")
+
     print(f"{'='*80}")
     print(f"PIPELINE COMPLETE - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*80}\n")
