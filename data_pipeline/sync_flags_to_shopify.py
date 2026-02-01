@@ -97,10 +97,77 @@ class ShopifyFlagSyncer:
             '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer list
         }
 
+        # Sync history log path
+        self.sync_history_key = "shopify/sync_history.csv"
+
         print("✅ Shopify Flag Syncer initialized")
         print(f"   Store: {self.store_domain}")
         if self.klaviyo_private_key:
             print(f"   Klaviyo: enabled ({len(self.klaviyo_flag_list_map)} flag-to-list mappings)")
+
+    def log_sync_action(
+        self,
+        capitan_customer_id: str,
+        shopify_customer_id: str,
+        tag_name: str,
+        action: str,
+        email: str = None,
+        metadata: dict = None
+    ):
+        """
+        Append a sync action to the history log.
+
+        This is an append-only audit log of all tag sync actions.
+
+        Args:
+            capitan_customer_id: Capitan customer ID
+            shopify_customer_id: Shopify customer ID
+            tag_name: Tag that was added/removed
+            action: 'added' or 'removed'
+            email: Customer email (optional, for easier debugging)
+            metadata: Additional context (optional)
+        """
+        timestamp = datetime.utcnow().isoformat() + 'Z'
+
+        new_row = {
+            'timestamp': timestamp,
+            'capitan_customer_id': str(capitan_customer_id),
+            'shopify_customer_id': str(shopify_customer_id),
+            'tag_name': tag_name,
+            'action': action,
+            'email': email or '',
+            'metadata': json.dumps(metadata) if metadata else ''
+        }
+
+        try:
+            # Load existing history
+            try:
+                obj = self.s3_client.get_object(
+                    Bucket=self.bucket_name,
+                    Key=self.sync_history_key
+                )
+                df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            except self.s3_client.exceptions.NoSuchKey:
+                # Create new history file
+                df = pd.DataFrame(columns=[
+                    'timestamp', 'capitan_customer_id', 'shopify_customer_id',
+                    'tag_name', 'action', 'email', 'metadata'
+                ])
+
+            # Append new row
+            new_df = pd.DataFrame([new_row])
+            df = pd.concat([df, new_df], ignore_index=True)
+
+            # Save back to S3
+            csv_buffer = StringIO()
+            df.to_csv(csv_buffer, index=False)
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=self.sync_history_key,
+                Body=csv_buffer.getvalue()
+            )
+        except Exception as e:
+            print(f"   ⚠️  Failed to log sync action: {e}")
 
     def add_tag_to_klaviyo_profile(self, email: str, tag_name: str) -> bool:
         """
@@ -690,13 +757,21 @@ class ShopifyFlagSyncer:
 
         return []
 
-    def add_customer_tag(self, shopify_customer_id: str, tag: str) -> bool:
+    def add_customer_tag(
+        self,
+        shopify_customer_id: str,
+        tag: str,
+        capitan_customer_id: str = None,
+        email: str = None
+    ) -> bool:
         """
         Add a tag to a Shopify customer.
 
         Args:
             shopify_customer_id: Shopify customer ID
             tag: Tag to add
+            capitan_customer_id: Optional Capitan ID for history logging
+            email: Optional email for history logging
 
         Returns:
             True if successful, False otherwise
@@ -725,6 +800,14 @@ class ShopifyFlagSyncer:
             self._rate_limit()  # Rate limit before API call
             response = requests.put(url, headers=self.headers, json=payload, timeout=10)
             if response.status_code == 200:
+                # Log to sync history
+                self.log_sync_action(
+                    capitan_customer_id=capitan_customer_id or 'unknown',
+                    shopify_customer_id=shopify_customer_id,
+                    tag_name=tag,
+                    action='added',
+                    email=email
+                )
                 return True
             else:
                 print(f"   ⚠️  Failed to add tag: {response.status_code} - {response.text}")
@@ -733,13 +816,21 @@ class ShopifyFlagSyncer:
             print(f"   ⚠️  Error adding tag: {e}")
             return False
 
-    def remove_customer_tag(self, shopify_customer_id: str, tag: str) -> bool:
+    def remove_customer_tag(
+        self,
+        shopify_customer_id: str,
+        tag: str,
+        capitan_customer_id: str = None,
+        email: str = None
+    ) -> bool:
         """
         Remove a tag from a Shopify customer.
 
         Args:
             shopify_customer_id: Shopify customer ID
             tag: Tag to remove
+            capitan_customer_id: Optional Capitan ID for history logging
+            email: Optional email for history logging
 
         Returns:
             True if successful, False otherwise
@@ -768,6 +859,14 @@ class ShopifyFlagSyncer:
             self._rate_limit()  # Rate limit before API call
             response = requests.put(url, headers=self.headers, json=payload, timeout=10)
             if response.status_code == 200:
+                # Log to sync history
+                self.log_sync_action(
+                    capitan_customer_id=capitan_customer_id or 'unknown',
+                    shopify_customer_id=shopify_customer_id,
+                    tag_name=tag,
+                    action='removed',
+                    email=email
+                )
                 return True
             else:
                 print(f"   ⚠️  Failed to remove tag: {response.status_code} - {response.text}")
@@ -877,7 +976,9 @@ class ShopifyFlagSyncer:
                 if not dry_run:
                     success = self.add_customer_tag(
                         shopify_customer_id=shopify_id,
-                        tag=tag_name
+                        tag=tag_name,
+                        capitan_customer_id=capitan_id,
+                        email=str(email) if email and pd.notna(email) else None
                     )
                     if success:
                         synced += 1
@@ -887,7 +988,9 @@ class ShopifyFlagSyncer:
                         sent_tag_name = f"{tag_name}-sent"
                         sent_success = self.add_customer_tag(
                             shopify_customer_id=shopify_id,
-                            tag=sent_tag_name
+                            tag=sent_tag_name,
+                            capitan_customer_id=capitan_id,
+                            email=str(email) if email and pd.notna(email) else None
                         )
                         if sent_success:
                             print(f"   ✅ Added sent tag '{sent_tag_name}'")
@@ -1006,7 +1109,8 @@ class ShopifyFlagSyncer:
             if not dry_run:
                 success = self.remove_customer_tag(
                     shopify_customer_id=shopify_id,
-                    tag=tag_name
+                    tag=tag_name,
+                    capitan_customer_id=capitan_id
                 )
                 if success:
                     removed_count += 1
