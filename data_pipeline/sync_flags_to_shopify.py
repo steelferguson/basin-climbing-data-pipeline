@@ -100,6 +100,10 @@ class ShopifyFlagSyncer:
         # Sync history log path
         self.sync_history_key = "shopify/sync_history.csv"
 
+        # Klaviyo suppression cache (unsubscribes)
+        self._klaviyo_email_suppressions = None
+        self._klaviyo_sms_suppressions = None
+
         print("✅ Shopify Flag Syncer initialized")
         print(f"   Store: {self.store_domain}")
         if self.klaviyo_private_key:
@@ -168,6 +172,77 @@ class ShopifyFlagSyncer:
             )
         except Exception as e:
             print(f"   ⚠️  Failed to log sync action: {e}")
+
+    def load_klaviyo_suppressions(self):
+        """
+        Load email and SMS suppressions (unsubscribes) from Klaviyo.
+
+        Caches the results for the duration of the sync run.
+        """
+        if self._klaviyo_email_suppressions is not None:
+            return  # Already loaded
+
+        if not self.klaviyo_headers:
+            self._klaviyo_email_suppressions = set()
+            self._klaviyo_sms_suppressions = set()
+            return
+
+        print("   📋 Loading Klaviyo suppression lists...")
+
+        # Load email suppressions
+        email_suppressions = set()
+        url = 'https://a.klaviyo.com/api/profiles?filter=equals(subscriptions.email.marketing.suppression.reason,"UNSUBSCRIBE")&page[size]=100'
+        try:
+            while url:
+                response = requests.get(url, headers=self.klaviyo_headers, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    for profile in data.get('data', []):
+                        email = profile.get('attributes', {}).get('email', '')
+                        if email:
+                            email_suppressions.add(email.lower().strip())
+                    url = data.get('links', {}).get('next')
+                else:
+                    break
+        except Exception as e:
+            print(f"   ⚠️  Error loading email suppressions: {e}")
+
+        # Load SMS suppressions
+        sms_suppressions = set()
+        url = 'https://a.klaviyo.com/api/profiles?filter=equals(subscriptions.sms.marketing.suppression.reason,"UNSUBSCRIBE")&page[size]=100'
+        try:
+            while url:
+                response = requests.get(url, headers=self.klaviyo_headers, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    for profile in data.get('data', []):
+                        phone = profile.get('attributes', {}).get('phone_number', '')
+                        if phone:
+                            # Normalize to digits only for comparison
+                            phone_digits = ''.join(c for c in phone if c.isdigit())
+                            sms_suppressions.add(phone_digits)
+                    url = data.get('links', {}).get('next')
+                else:
+                    break
+        except Exception as e:
+            print(f"   ⚠️  Error loading SMS suppressions: {e}")
+
+        self._klaviyo_email_suppressions = email_suppressions
+        self._klaviyo_sms_suppressions = sms_suppressions
+        print(f"   ✅ Loaded {len(email_suppressions)} email + {len(sms_suppressions)} SMS suppressions")
+
+    def is_email_suppressed(self, email: str) -> bool:
+        """Check if an email is on the Klaviyo suppression list."""
+        if self._klaviyo_email_suppressions is None:
+            self.load_klaviyo_suppressions()
+        return email.lower().strip() in self._klaviyo_email_suppressions
+
+    def is_phone_suppressed(self, phone: str) -> bool:
+        """Check if a phone is on the Klaviyo SMS suppression list."""
+        if self._klaviyo_sms_suppressions is None:
+            self.load_klaviyo_suppressions()
+        phone_digits = ''.join(c for c in str(phone) if c.isdigit())
+        return phone_digits in self._klaviyo_sms_suppressions
 
     def add_tag_to_klaviyo_profile(self, email: str, tag_name: str) -> bool:
         """
@@ -311,6 +386,8 @@ class ShopifyFlagSyncer:
         """
         Subscribe a customer to email and SMS marketing in Klaviyo.
 
+        Respects unsubscribes - will NOT re-subscribe someone who has opted out.
+
         Args:
             email: Customer email address (required)
             phone: Customer phone number (optional, for SMS)
@@ -326,9 +403,28 @@ class ShopifyFlagSyncer:
 
         email = str(email).strip()
 
+        # Check for email suppression (unsubscribe)
+        if self.is_email_suppressed(email):
+            print(f"   ⏭️  Skipping {email} - previously unsubscribed from email")
+            email_suppressed = True
+        else:
+            email_suppressed = False
+
+        # Check for SMS suppression
+        phone_suppressed = False
+        if phone and pd.notna(phone):
+            if self.is_phone_suppressed(phone):
+                print(f"   ⏭️  Skipping {phone} - previously unsubscribed from SMS")
+                phone_suppressed = True
+
+        # If both are suppressed, nothing to do
+        if email_suppressed and (not phone or phone_suppressed):
+            return True  # Not an error, just skipped
+
         try:
-            # Subscribe to email
-            email_payload = {
+            # Subscribe to email (only if not suppressed)
+            if not email_suppressed:
+                email_payload = {
                 "data": {
                     "type": "profile-subscription-bulk-create-job",
                     "attributes": {
@@ -353,20 +449,20 @@ class ShopifyFlagSyncer:
                 }
             }
 
-            response = requests.post(
-                "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs",
-                headers=self.klaviyo_headers,
-                json=email_payload,
-                timeout=30
-            )
+                response = requests.post(
+                    "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs",
+                    headers=self.klaviyo_headers,
+                    json=email_payload,
+                    timeout=30
+                )
 
-            if response.status_code in [200, 201, 202, 204]:
-                print(f"   ✅ Subscribed {email} to email marketing")
-            else:
-                print(f"   ⚠️  Email subscription failed ({response.status_code})")
+                if response.status_code in [200, 201, 202, 204]:
+                    print(f"   ✅ Subscribed {email} to email marketing")
+                else:
+                    print(f"   ⚠️  Email subscription failed ({response.status_code})")
 
-            # Subscribe to SMS if phone provided
-            if phone and pd.notna(phone):
+            # Subscribe to SMS if phone provided and not suppressed
+            if phone and pd.notna(phone) and not phone_suppressed:
                 phone_str = str(phone).strip()
                 # Normalize phone - ensure it starts with +1 for US
                 if not phone_str.startswith('+'):
