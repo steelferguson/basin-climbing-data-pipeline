@@ -34,6 +34,9 @@ beautifulsoup4==4.12.3
 python-Levenshtein==0.25.1
 Levenshtein==0.25.1
 
+# AI/LLM
+anthropic>=0.39.0
+
 # Utilities
 python-dotenv==1.1.0
 python-dateutil==2.8.2
