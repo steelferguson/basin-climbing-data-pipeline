@@ -165,7 +165,12 @@ class ShopifyDataFetcher:
 
                     # Customer
                     "customer_id": order.get("customer", {}).get("id") if order.get("customer") else None,
-                    "customer_email": order.get("email"),
+                    # Try order.email first, then contact_email, then customer.email as fallbacks
+                    "customer_email": (
+                        order.get("email") or
+                        order.get("contact_email") or
+                        (order.get("customer", {}).get("email") if order.get("customer") else None)
+                    ),
                     "customer_first_name": order.get("customer", {}).get("first_name") if order.get("customer") else None,
                     "customer_last_name": order.get("customer", {}).get("last_name") if order.get("customer") else None,
                     "buyer_accepts_marketing": order.get("buyer_accepts_marketing", False),
