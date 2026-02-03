@@ -226,6 +226,15 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error building membership conversion metrics: {e}\n")
 
+    # 9c2. Build conversion rate analysis (day pass to membership cohorts)
+    print("11c2. Building conversion rate analysis (cohorts + snapshots)...")
+    try:
+        from data_pipeline.build_conversion_rate_analysis import upload_conversion_rate_analysis
+        upload_conversion_rate_analysis(save_local=False)
+        print("✅ Conversion rate analysis updated\n")
+    except Exception as e:
+        print(f"❌ Error building conversion rate analysis: {e}\n")
+
     # 9d. Build flag-email verification report
     print("11d. Building flag-email verification report...")
     try:
