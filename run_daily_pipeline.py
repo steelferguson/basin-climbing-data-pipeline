@@ -294,6 +294,16 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error syncing Klaviyo SMS consent: {e}\n")
 
+    # 11b2. Sync Klaviyo email consent to email tracker (source of truth)
+    print("13b2. Syncing Klaviyo email consent to email tracker...")
+    try:
+        from data_pipeline.sync_klaviyo_email_consent import KlaviyoEmailConsentSync
+        email_consent_sync = KlaviyoEmailConsentSync()
+        email_consent_sync.sync(dry_run=False)
+        print("✅ Klaviyo email consent synced to tracker\n")
+    except Exception as e:
+        print(f"❌ Error syncing Klaviyo email consent: {e}\n")
+
     # 11c. Build unified contact preferences (email + SMS opt-in from all sources)
     print("13c. Building contact preferences (Capitan + Mailchimp + Twilio + Klaviyo)...")
     try:
