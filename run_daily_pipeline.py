@@ -37,6 +37,7 @@ from data_pipeline.pipeline_handler import (
     update_customer_master
 )
 import datetime
+import pandas as pd
 
 def run_daily_pipeline():
     """Run all daily data fetch tasks."""
@@ -388,6 +389,36 @@ def run_daily_pipeline():
         print(f"✅ Fetched {len(activity_df)} Klaviyo message events\n")
     except Exception as e:
         print(f"❌ Error fetching Klaviyo activity: {e}\n")
+
+    # 21. Flag suspicious transactions (potential miscategorized birthday revenue)
+    print("21. Flagging suspicious transactions (last 30 days)...")
+    try:
+        from data_pipeline.flag_suspicious_transactions import flag_suspicious_transactions, get_suspicious_transaction_summary
+        import boto3
+        from io import StringIO
+        import os
+
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
+        )
+        obj = s3.get_object(Bucket='basin-climbing-data-prod', Key='transactions/combined_transaction_data.csv')
+        df_transactions = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+
+        df_flags = flag_suspicious_transactions(df_transactions, days_back=30)
+        summary = get_suspicious_transaction_summary(df_flags)
+
+        if summary['total_flagged'] > 0:
+            print(f"⚠️  Found {summary['total_flagged']} suspicious transactions (${summary['total_amount']:,.2f})")
+            print(f"    High confidence: {summary['high_confidence']}, Medium: {summary['medium_confidence']}")
+            # Save to local file for review
+            df_flags.to_csv('data/outputs/suspicious_transactions.csv', index=False)
+            print("    Saved to data/outputs/suspicious_transactions.csv")
+        else:
+            print("✅ No suspicious transactions found\n")
+    except Exception as e:
+        print(f"❌ Error flagging suspicious transactions: {e}\n")
 
     print(f"{'='*80}")
     print(f"PIPELINE COMPLETE - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
