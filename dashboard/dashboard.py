@@ -40,6 +40,81 @@ def load_data():
     return df_memberships, df_members, df_transactions, df_projection, df_at_risk, df_facebook_ads, df_events, df_customer_events
 
 
+def load_ab_test_data():
+    """Load AB test experiments and entries from S3."""
+    try:
+        df_experiments = load_df_from_s3(config.aws_bucket_name, config.s3_path_ab_test_experiments)
+    except Exception:
+        df_experiments = pd.DataFrame(columns=['experiment_id', 'experiment_name', 'start_date', 'end_date', 'status'])
+
+    try:
+        df_entries = load_df_from_s3(config.aws_bucket_name, config.s3_path_experiment_entries)
+    except Exception:
+        df_entries = pd.DataFrame(columns=['customer_id', 'experiment_id', 'entry_date', 'group', 'entry_flag'])
+
+    try:
+        df_memberships = load_df_from_s3(config.aws_bucket_name, config.s3_path_capitan_memberships)
+    except Exception:
+        df_memberships = pd.DataFrame(columns=['owner_id', 'status', 'start_date'])
+
+    return df_experiments, df_entries, df_memberships
+
+
+def calculate_ab_test_results(df_experiments, df_entries, df_memberships):
+    """Calculate conversion results for each AB test experiment."""
+    results = []
+
+    for _, exp in df_experiments.iterrows():
+        exp_id = exp['experiment_id']
+        exp_entries = df_entries[df_entries['experiment_id'] == exp_id]
+
+        if len(exp_entries) == 0:
+            results.append({
+                'experiment_id': exp_id,
+                'experiment_name': exp.get('experiment_name', exp_id),
+                'start_date': exp.get('start_date', ''),
+                'end_date': exp.get('end_date', ''),
+                'status': exp.get('status', ''),
+                'group_a_count': 0,
+                'group_b_count': 0,
+                'group_a_converted': 0,
+                'group_b_converted': 0,
+                'group_a_rate': 0.0,
+                'group_b_rate': 0.0,
+            })
+            continue
+
+        # Count by group
+        group_a = exp_entries[exp_entries['group'] == 'A']
+        group_b = exp_entries[exp_entries['group'] == 'B']
+
+        # Get customer IDs who converted (have active membership)
+        active_member_ids = set(df_memberships[df_memberships['status'] == 'ACT']['owner_id'].astype(str))
+
+        # Count conversions
+        group_a_converted = len([c for c in group_a['customer_id'].astype(str) if c in active_member_ids])
+        group_b_converted = len([c for c in group_b['customer_id'].astype(str) if c in active_member_ids])
+
+        group_a_count = len(group_a)
+        group_b_count = len(group_b)
+
+        results.append({
+            'experiment_id': exp_id,
+            'experiment_name': exp.get('experiment_name', exp_id),
+            'start_date': exp.get('start_date', ''),
+            'end_date': exp.get('end_date', '') if pd.notna(exp.get('end_date', '')) else 'Active',
+            'status': exp.get('status', ''),
+            'group_a_count': group_a_count,
+            'group_b_count': group_b_count,
+            'group_a_converted': group_a_converted,
+            'group_b_converted': group_b_converted,
+            'group_a_rate': round(100 * group_a_converted / group_a_count, 1) if group_a_count > 0 else 0.0,
+            'group_b_rate': round(100 * group_b_converted / group_b_count, 1) if group_b_count > 0 else 0.0,
+        })
+
+    return pd.DataFrame(results)
+
+
 def create_dashboard(app):
 
     df_memberships, df_members, df_combined, df_projection, df_at_risk, df_facebook_ads, df_events, df_customer_events = load_data()
@@ -487,6 +562,37 @@ def create_dashboard(app):
                     "fontFamily": "Arial, sans-serif",
                 })  # Close html.Div for System Health tab
             ]),  # Close dcc.Tab for System Health
+
+            # AB Tests Tab
+            dcc.Tab(label='AB Tests', value='ab-tests', children=[
+                html.Div([
+                    html.H1("AB Test Results", style={"color": "#213B3F", "marginBottom": "10px"}),
+                    html.P("Comparing conversion rates between test groups.", style={"color": "#666", "marginBottom": "20px"}),
+
+                    # Experiment selector dropdown
+                    html.Div([
+                        html.Label("Select Experiment:", style={"fontWeight": "bold", "marginRight": "10px"}),
+                        dcc.Dropdown(
+                            id='ab-test-experiment-dropdown',
+                            options=[],  # Populated by callback
+                            value=None,
+                            placeholder="Select an experiment...",
+                            style={"width": "400px", "display": "inline-block"}
+                        ),
+                    ], style={"marginBottom": "30px", "display": "flex", "alignItems": "center"}),
+
+                    # AB Test Results Container
+                    html.Div(id='ab-test-results-container'),
+                ],
+                style={
+                    "margin": "0 auto",
+                    "maxWidth": "1200px",
+                    "padding": "20px",
+                    "backgroundColor": "#FFFFFF",
+                    "color": "#26241C",
+                    "fontFamily": "Arial, sans-serif",
+                })  # Close html.Div for AB Tests tab
+            ]),  # Close dcc.Tab for AB Tests
 
         ])  # Close dcc.Tabs
     ])  # Close outer html.Div (app.layout)
@@ -2196,3 +2302,180 @@ def create_dashboard(app):
         )
 
         return fig
+
+    # Callback to populate AB Test dropdown
+    @app.callback(
+        [Output('ab-test-experiment-dropdown', 'options'),
+         Output('ab-test-experiment-dropdown', 'value')],
+        [Input('tabs', 'value')]
+    )
+    def populate_ab_test_dropdown(tab):
+        """Populate dropdown with available experiments."""
+        df_experiments, _, _ = load_ab_test_data()
+
+        if df_experiments.empty:
+            return [], None
+
+        # Create dropdown options with status indicator
+        options = []
+        for _, exp in df_experiments.iterrows():
+            status = exp.get('status', 'unknown')
+            status_label = f" [{status.upper()}]" if status else ""
+            options.append({
+                'label': f"{exp['experiment_name']}{status_label}",
+                'value': exp['experiment_id']
+            })
+
+        # Default to the active experiment, or the first one
+        active_exp = df_experiments[df_experiments['status'] == 'active']
+        default_value = active_exp['experiment_id'].iloc[0] if len(active_exp) > 0 else (options[0]['value'] if options else None)
+
+        return options, default_value
+
+    # Callback for AB Test Results
+    @app.callback(
+        Output('ab-test-results-container', 'children'),
+        [Input('ab-test-experiment-dropdown', 'value')]
+    )
+    def update_ab_test_results(selected_experiment):
+        """Load and display AB test results for selected experiment."""
+        if not selected_experiment:
+            return html.Div([
+                html.P("Select an experiment to view results.", style={"color": "#666", "fontStyle": "italic"})
+            ])
+
+        df_experiments, df_entries, df_memberships_ab = load_ab_test_data()
+        df_results = calculate_ab_test_results(df_experiments, df_entries, df_memberships_ab)
+
+        # Filter to selected experiment
+        row = df_results[df_results['experiment_id'] == selected_experiment]
+        if row.empty:
+            return html.Div([
+                html.P("No data found for this experiment.", style={"color": "#666", "fontStyle": "italic"})
+            ])
+
+        row = row.iloc[0]
+
+        # Determine status styling
+        status = row.get('status', 'unknown')
+        status_colors = {
+            'active': "#28a745",      # Green
+            'in_progress': "#28a745", # Green
+            'ended': "#6c757d",       # Gray
+            'invalidated': "#dc3545", # Red
+            'paused': "#ffc107",      # Yellow
+        }
+        status_color = status_colors.get(status, "#6c757d")
+
+        # Get group definitions from the experiments dataframe
+        exp_row = df_experiments[df_experiments['experiment_id'] == row['experiment_id']]
+        group_a_def = exp_row['group_a_definition'].iloc[0] if len(exp_row) > 0 and 'group_a_definition' in exp_row.columns else 'Group A'
+        group_b_def = exp_row['group_b_definition'].iloc[0] if len(exp_row) > 0 and 'group_b_definition' in exp_row.columns else 'Group B'
+        entry_criteria = exp_row['entry_criteria'].iloc[0] if len(exp_row) > 0 and 'entry_criteria' in exp_row.columns else ''
+
+        # Invalidated warning banner
+        warning_banner = None
+        if status == 'invalidated':
+            warning_banner = html.Div([
+                html.Strong("⚠️ This experiment was invalidated. "),
+                html.Span("Results should not be used for decision-making. The test had issues (e.g., emails not sending correctly).")
+            ], style={
+                "backgroundColor": "#f8d7da",
+                "color": "#721c24",
+                "padding": "15px",
+                "borderRadius": "8px",
+                "marginBottom": "20px",
+                "border": "1px solid #f5c6cb"
+            })
+
+        card = html.Div([
+            # Warning banner if invalidated
+            warning_banner,
+
+            # Header with experiment name and status
+            html.Div([
+                html.H2(row['experiment_name'], style={"margin": "0", "color": "#213B3F"}),
+                html.Span(status.upper().replace('_', ' '),
+                    style={
+                        "backgroundColor": status_color,
+                        "color": "#FFFFFF",
+                        "padding": "4px 12px",
+                        "borderRadius": "12px",
+                        "fontSize": "12px",
+                        "fontWeight": "bold",
+                        "marginLeft": "15px"
+                    }
+                )
+            ], style={"display": "flex", "alignItems": "center", "marginBottom": "10px"}),
+
+            # Dates
+            html.P([
+                html.Strong("Start Date: "), str(row['start_date']),
+                html.Span(" | ", style={"margin": "0 10px"}),
+                html.Strong("End Date: "), str(row['end_date']) if row['end_date'] and row['end_date'] != 'Active' else "Ongoing"
+            ], style={"color": "#666", "marginBottom": "15px"}),
+
+            # Entry criteria
+            html.Div([
+                html.Strong("Entry Criteria: "),
+                html.Span(entry_criteria, style={"color": "#666"})
+            ], style={"marginBottom": "20px", "fontSize": "14px"}) if entry_criteria else None,
+
+            # Group definitions
+            html.Div([
+                html.Div([
+                    html.H4("Group A (Control)", style={"color": "#AF5436", "margin": "0 0 5px 0"}),
+                    html.P(group_a_def, style={"color": "#666", "fontSize": "14px", "margin": "0"})
+                ], style={"flex": "1", "paddingRight": "20px", "borderRight": "1px solid #ddd"}),
+                html.Div([
+                    html.H4("Group B (Treatment)", style={"color": "#213B3F", "margin": "0 0 5px 0"}),
+                    html.P(group_b_def, style={"color": "#666", "fontSize": "14px", "margin": "0"})
+                ], style={"flex": "1", "paddingLeft": "20px"})
+            ], style={"display": "flex", "marginBottom": "25px", "padding": "20px", "backgroundColor": "#f8f9fa", "borderRadius": "8px"}),
+
+            # Results table
+            html.H3("Conversion Results", style={"color": "#213B3F", "marginBottom": "15px"}),
+            html.Table([
+                html.Thead([
+                    html.Tr([
+                        html.Th("Group", style={"padding": "12px 20px", "textAlign": "left", "borderBottom": "2px solid #213B3F", "backgroundColor": "#f8f9fa"}),
+                        html.Th("Customers Entered", style={"padding": "12px 20px", "textAlign": "center", "borderBottom": "2px solid #213B3F", "backgroundColor": "#f8f9fa"}),
+                        html.Th("Converted to Member", style={"padding": "12px 20px", "textAlign": "center", "borderBottom": "2px solid #213B3F", "backgroundColor": "#f8f9fa"}),
+                        html.Th("Conversion Rate", style={"padding": "12px 20px", "textAlign": "center", "borderBottom": "2px solid #213B3F", "backgroundColor": "#f8f9fa"}),
+                    ])
+                ]),
+                html.Tbody([
+                    html.Tr([
+                        html.Td("Group A", style={"padding": "15px 20px", "color": "#AF5436", "fontWeight": "bold", "borderBottom": "1px solid #eee"}),
+                        html.Td(str(row['group_a_count']), style={"padding": "15px 20px", "textAlign": "center", "borderBottom": "1px solid #eee", "fontSize": "18px"}),
+                        html.Td(str(row['group_a_converted']), style={"padding": "15px 20px", "textAlign": "center", "borderBottom": "1px solid #eee", "fontSize": "18px"}),
+                        html.Td(f"{row['group_a_rate']}%", style={"padding": "15px 20px", "textAlign": "center", "fontWeight": "bold", "color": "#AF5436", "fontSize": "20px", "borderBottom": "1px solid #eee"}),
+                    ]),
+                    html.Tr([
+                        html.Td("Group B", style={"padding": "15px 20px", "color": "#213B3F", "fontWeight": "bold"}),
+                        html.Td(str(row['group_b_count']), style={"padding": "15px 20px", "textAlign": "center", "fontSize": "18px"}),
+                        html.Td(str(row['group_b_converted']), style={"padding": "15px 20px", "textAlign": "center", "fontSize": "18px"}),
+                        html.Td(f"{row['group_b_rate']}%", style={"padding": "15px 20px", "textAlign": "center", "fontWeight": "bold", "color": "#213B3F", "fontSize": "20px"}),
+                    ]),
+                ])
+            ], style={"width": "100%", "borderCollapse": "collapse", "marginBottom": "20px", "border": "1px solid #ddd", "borderRadius": "8px"}),
+
+            # Difference indicator
+            html.Div([
+                html.Span(
+                    f"{'Group A' if row['group_a_rate'] > row['group_b_rate'] else 'Group B'} leads by {abs(row['group_a_rate'] - row['group_b_rate']):.1f} percentage points"
+                    if row['group_a_count'] > 0 and row['group_b_count'] > 0 and row['group_a_rate'] != row['group_b_rate']
+                    else ("Tied" if row['group_a_rate'] == row['group_b_rate'] and row['group_a_count'] > 0 else "Waiting for more data..."),
+                    style={"color": "#666", "fontStyle": "italic", "fontSize": "16px"}
+                )
+            ], style={"textAlign": "center", "padding": "15px", "backgroundColor": "#f8f9fa", "borderRadius": "8px"})
+
+        ], style={
+            "border": "1px solid #ddd",
+            "borderRadius": "10px",
+            "padding": "25px",
+            "backgroundColor": "#FFFFFF",
+            "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"
+        })
+
+        return card

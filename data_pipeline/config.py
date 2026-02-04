@@ -113,6 +113,7 @@ s3_path_shopify_orders = "shopify/orders.csv"
 s3_path_shopify_orders_snapshot = "shopify/snapshots/orders.csv"
 s3_path_shopify_synced_flags = "shopify/synced_flags.csv"  # Tracks which flags have been synced to Shopify
 s3_path_experiment_entries = "experiments/customer_experiment_entries.csv"  # AB test group assignments
+s3_path_ab_test_experiments = "experiments/ab_test_experiments.csv"  # AB test definitions
 
 # Twilio paths
 s3_path_twilio_messages = "twilio/messages.csv"
