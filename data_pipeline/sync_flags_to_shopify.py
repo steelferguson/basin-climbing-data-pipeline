@@ -100,6 +100,10 @@ class ShopifyFlagSyncer:
         # Sync history log path
         self.sync_history_key = "shopify/sync_history.csv"
 
+        # Pending sent tags queue (for delayed -sent tag addition)
+        self.pending_sent_tags_key = "shopify/pending_sent_tags.csv"
+        self.sent_tag_delay_minutes = 10  # Wait 10 minutes before adding -sent tag
+
         # Klaviyo suppression cache (unsubscribes)
         self._klaviyo_email_suppressions = None
         self._klaviyo_sms_suppressions = None
@@ -788,6 +792,157 @@ class ShopifyFlagSyncer:
         except Exception as e:
             print(f"   ⚠️  Error saving sync events to customer_events: {e}")
 
+    def load_pending_sent_tags(self) -> pd.DataFrame:
+        """
+        Load the pending sent tags queue from S3.
+
+        Returns:
+            DataFrame with columns: capitan_customer_id, shopify_customer_id, tag_name, email, queued_at
+        """
+        try:
+            obj = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key=self.pending_sent_tags_key
+            )
+            df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            df['queued_at'] = pd.to_datetime(df['queued_at'])
+            return df
+        except self.s3_client.exceptions.NoSuchKey:
+            return pd.DataFrame(columns=[
+                'capitan_customer_id', 'shopify_customer_id', 'tag_name', 'email', 'queued_at'
+            ])
+        except Exception as e:
+            print(f"   ⚠️  Error loading pending sent tags: {e}")
+            return pd.DataFrame(columns=[
+                'capitan_customer_id', 'shopify_customer_id', 'tag_name', 'email', 'queued_at'
+            ])
+
+    def save_pending_sent_tags(self, df: pd.DataFrame):
+        """
+        Save the pending sent tags queue to S3.
+
+        Args:
+            df: DataFrame with pending sent tag records
+        """
+        try:
+            csv_buffer = StringIO()
+            df.to_csv(csv_buffer, index=False)
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=self.pending_sent_tags_key,
+                Body=csv_buffer.getvalue()
+            )
+        except Exception as e:
+            print(f"   ⚠️  Error saving pending sent tags: {e}")
+
+    def queue_sent_tag(
+        self,
+        pending_df: pd.DataFrame,
+        capitan_customer_id: str,
+        shopify_customer_id: str,
+        tag_name: str,
+        email: str = None
+    ) -> pd.DataFrame:
+        """
+        Add a customer to the pending sent tags queue.
+
+        The -sent tag will be added after the delay period (default 10 minutes).
+
+        Args:
+            pending_df: Current pending DataFrame
+            capitan_customer_id: Capitan customer ID
+            shopify_customer_id: Shopify customer ID
+            tag_name: Base tag name (e.g., 'second-visit-offer-eligible')
+            email: Customer email (for logging)
+
+        Returns:
+            Updated pending DataFrame
+        """
+        # Check if already queued
+        mask = (
+            (pending_df['capitan_customer_id'].astype(str) == str(capitan_customer_id)) &
+            (pending_df['tag_name'] == tag_name)
+        )
+
+        if mask.any():
+            # Already queued, skip
+            return pending_df
+
+        # Add new record
+        new_record = pd.DataFrame([{
+            'capitan_customer_id': str(capitan_customer_id),
+            'shopify_customer_id': str(shopify_customer_id),
+            'tag_name': tag_name,
+            'email': email or '',
+            'queued_at': datetime.now().isoformat()
+        }])
+        pending_df = pd.concat([pending_df, new_record], ignore_index=True)
+
+        return pending_df
+
+    def process_pending_sent_tags(self, dry_run: bool = False):
+        """
+        Process pending sent tags that have waited long enough.
+
+        Adds the -sent tag to customers who were queued more than
+        sent_tag_delay_minutes ago.
+
+        Args:
+            dry_run: If True, only print what would be done
+        """
+        print(f"\n⏰ Processing pending -sent tags (delay: {self.sent_tag_delay_minutes} minutes)...")
+
+        pending_df = self.load_pending_sent_tags()
+
+        if pending_df.empty:
+            print("   ℹ️  No pending sent tags to process")
+            return
+
+        # Find entries older than the delay
+        cutoff = datetime.now() - pd.Timedelta(minutes=self.sent_tag_delay_minutes)
+        pending_df['queued_at'] = pd.to_datetime(pending_df['queued_at'])
+        ready_mask = pending_df['queued_at'] < cutoff
+
+        ready_df = pending_df[ready_mask]
+        remaining_df = pending_df[~ready_mask]
+
+        print(f"   📊 {len(ready_df)} ready to process, {len(remaining_df)} still waiting")
+
+        if ready_df.empty:
+            return
+
+        processed = 0
+        errors = 0
+
+        for _, row in ready_df.iterrows():
+            capitan_id = row['capitan_customer_id']
+            shopify_id = row['shopify_customer_id']
+            tag_name = row['tag_name']
+            email = row['email']
+            sent_tag = f"{tag_name}-sent"
+
+            if not dry_run:
+                success = self.add_customer_tag(
+                    shopify_customer_id=shopify_id,
+                    tag=sent_tag,
+                    capitan_customer_id=capitan_id,
+                    email=email if email else None
+                )
+                if success:
+                    processed += 1
+                    print(f"   ✅ Added delayed sent tag '{sent_tag}' to customer {capitan_id}")
+                else:
+                    errors += 1
+                    print(f"   ⚠️  Failed to add sent tag '{sent_tag}' to customer {capitan_id}")
+            else:
+                processed += 1
+                print(f"   [DRY RUN] Would add sent tag '{sent_tag}' to customer {capitan_id}")
+
+        # Save remaining pending tags
+        if not dry_run:
+            self.save_pending_sent_tags(remaining_df)
+            print(f"   ✅ Processed {processed} sent tags, {errors} errors, {len(remaining_df)} still pending")
+
     def track_synced_flag(
         self,
         tracking_df: pd.DataFrame,
@@ -1193,6 +1348,11 @@ class ShopifyFlagSyncer:
         flags_df = self.load_flags_from_s3()
         customers_df = self.load_customers_from_s3()
         tracking_df = self.load_synced_flags_tracking()
+        pending_sent_df = self.load_pending_sent_tags()
+
+        # Always process pending sent tags first (from previous runs)
+        if not dry_run:
+            self.process_pending_sent_tags(dry_run=dry_run)
 
         if len(flags_df) == 0:
             print("\nℹ️  No flags to sync")
@@ -1282,18 +1442,16 @@ class ShopifyFlagSyncer:
                         synced += 1
                         print(f"   ✅ Added tag '{tag_name}' to customer {capitan_id} (Shopify ID: {shopify_id})")
 
-                        # Also add the "-sent" tag to indicate this offer was sent
-                        sent_tag_name = f"{tag_name}-sent"
-                        sent_success = self.add_customer_tag(
-                            shopify_customer_id=shopify_id,
-                            tag=sent_tag_name,
+                        # Queue the "-sent" tag to be added after delay
+                        # This gives Shopify Flow time to trigger before we mark as sent
+                        pending_sent_df = self.queue_sent_tag(
+                            pending_df=pending_sent_df,
                             capitan_customer_id=capitan_id,
+                            shopify_customer_id=shopify_id,
+                            tag_name=tag_name,
                             email=str(email) if email and pd.notna(email) else None
                         )
-                        if sent_success:
-                            print(f"   ✅ Added sent tag '{sent_tag_name}'")
-                        else:
-                            print(f"   ⚠️  Failed to add sent tag '{sent_tag_name}'")
+                        print(f"   📋 Queued sent tag for {tag_name} (will add in {self.sent_tag_delay_minutes} min)")
 
                         # Track the sync in tracking file
                         tracking_df = self.track_synced_flag(
@@ -1348,9 +1506,12 @@ class ShopifyFlagSyncer:
         print(f"\n🧹 Cleaning up stale tags...")
         tracking_df = self.cleanup_stale_tags(flags_df, tracking_df, dry_run=dry_run)
 
-        # Save the tracking file
+        # Save the tracking file and pending sent tags
         if not dry_run:
             self.save_synced_flags_tracking(tracking_df)
+            # Save pending sent tags queue
+            self.save_pending_sent_tags(pending_sent_df)
+            print(f"   📋 {len(pending_sent_df)} sent tags queued for delayed processing")
             # Save sync events to customer_events.csv for cooldown tracking
             print("\n📝 Logging sync events to customer_events...")
             self.save_synced_events_to_customer_events()

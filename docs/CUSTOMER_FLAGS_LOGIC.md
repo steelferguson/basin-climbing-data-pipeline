@@ -157,7 +157,34 @@ AB_GROUP_OVERRIDES = {
 
 ---
 
-### 5. `2_week_pass_purchase`
+### 5. `new_member`
+**Priority:** High
+**Description:** Customer is a new member (joined after 6+ months of no membership)
+**Shopify Tag:** `new-member`
+**Expires:** 14 days
+
+**Criteria:**
+1. ✓ Has `membership_started` or `membership_purchase` event within **last 3 days**
+2. ✓ Had **NO membership activity** (started, purchase, renewal) in the **6 months before** this one
+3. ✓ Has NOT been flagged for this in last **14 days**
+4. ✓ Has NOT been synced to Shopify for this in last **14 days**
+
+**Output Data:**
+- `membership_start_date`
+- `days_since_start`
+- `membership_name`
+- `membership_id`
+- `is_first_time_member`: true if never had a membership before
+- `days_since_last_membership`: days since their previous membership (if any)
+
+**Use Cases:**
+- Welcome email series for new members
+- New member orientation reminders
+- Special new member offers/discounts
+
+---
+
+### 6. `2_week_pass_purchase`
 **Priority:** Medium
 **Description:** Customer purchased a 2-week climbing or fitness pass
 **Shopify Tag:** `2-week-pass-purchase`
@@ -301,6 +328,7 @@ The sync job automatically removes tags from customers who:
 | `second_visit_offer_eligible` | 180 days | 30 days |
 | `second_visit_2wk_offer` | 180 days | 30 days |
 | `2_week_pass_purchase` | 14 days | - |
+| `new_member` | 14 days | 14 days |
 | `birthday_party_host_one_week_out` | 7 days (per party) | - |
 | `birthday_party_attendee_one_week_out` | 7 days (per party) | - |
 | `birthday_party_host_six_days_out` | 7 days (per party) | - |

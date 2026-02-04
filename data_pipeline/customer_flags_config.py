@@ -1235,6 +1235,137 @@ class MembershipCancelledWinbackFlag(FlagRule):
         }
 
 
+class NewMemberFlag(FlagRule):
+    """
+    Flag customers who are NEW members (just joined after not being a member).
+
+    Business logic:
+    - Customer has a membership_started event within the last 3 days
+    - Had NO membership (started, purchase, or renewal) in the 6 months BEFORE this new one
+    - This captures true "new" members, not people switching plans
+    - Hasn't been flagged for this in the last 14 days (the flag duration)
+
+    Shopify Tag: new-member
+    Expires: After 14 days (standard non-persistent flag)
+
+    Use cases:
+    - Welcome email series for new members
+    - New member orientation reminders
+    - Special new member offers
+    """
+
+    def __init__(self):
+        super().__init__(
+            flag_type="new_member",
+            description="Customer is a new member (joined after 6+ months of no membership)",
+            priority="high"
+        )
+
+    def evaluate(self, customer_id: str, events: list, today: datetime, email: str = None, phone: str = None) -> Dict[str, Any]:
+        """
+        Check if customer is a new member (recently started after 6+ month gap).
+        """
+        # Get all membership started events
+        membership_started_events = [
+            e for e in events
+            if e['event_type'] in ['membership_started', 'membership_purchase']
+        ]
+
+        if not membership_started_events:
+            return None
+
+        # Sort by date and get most recent
+        membership_started_events_sorted = sorted(membership_started_events, key=lambda e: e['event_date'])
+        most_recent_start = membership_started_events_sorted[-1]
+
+        # Criteria 1: Most recent membership start must be within last 3 days
+        three_days_ago = today - timedelta(days=3)
+        if most_recent_start['event_date'] < three_days_ago:
+            return None  # Not recent enough
+
+        # Criteria 2: Must have had NO membership activity in the 6 months BEFORE this new one
+        # This includes cancellations - if they cancelled recently, they were a member recently
+        six_months_before_start = most_recent_start['event_date'] - timedelta(days=180)
+
+        prior_membership_activity = [
+            e for e in events
+            if e['event_type'] in ['membership_started', 'membership_purchase', 'membership_renewal', 'membership_cancelled']
+            and e['event_date'] < most_recent_start['event_date']
+            and e['event_date'] >= six_months_before_start
+        ]
+
+        # If they had membership activity in the previous 6 months, they're not "new"
+        if prior_membership_activity:
+            return None
+
+        # Criteria 3: Must not have been flagged in last 14 days
+        lookback_start = today - timedelta(days=14)
+        recent_flags = [
+            e for e in events
+            if e['event_type'] == 'flag_set'
+            and isinstance(e.get('event_data'), dict)
+            and e.get('event_data', {}).get('flag_type') == self.flag_type
+            and e['event_date'] >= lookback_start
+            and e['event_date'] <= today
+        ]
+
+        if recent_flags:
+            return None
+
+        # Criteria 4: Must not have been synced to Shopify in last 14 days
+        recent_syncs = [
+            e for e in events
+            if e['event_type'] == 'flag_synced_to_shopify'
+            and isinstance(e.get('event_data'), dict)
+            and e.get('event_data', {}).get('flag_type') == self.flag_type
+            and e['event_date'] >= lookback_start
+            and e['event_date'] <= today
+        ]
+
+        if recent_syncs:
+            return None
+
+        # Extract membership details from event_data
+        membership_data = most_recent_start.get('event_data', {})
+        if isinstance(membership_data, str):
+            try:
+                membership_data = json.loads(membership_data)
+            except (json.JSONDecodeError, TypeError):
+                membership_data = {}
+        if not isinstance(membership_data, dict):
+            membership_data = {}
+
+        # Calculate how long since their last membership (if any)
+        all_prior_membership = [
+            e for e in events
+            if e['event_type'] in ['membership_started', 'membership_purchase', 'membership_renewal', 'membership_cancelled']
+            and e['event_date'] < most_recent_start['event_date']
+        ]
+
+        days_since_last_membership = None
+        is_first_time_member = True
+        if all_prior_membership:
+            is_first_time_member = False
+            most_recent_prior = max(all_prior_membership, key=lambda e: e['event_date'])
+            days_since_last_membership = (most_recent_start['event_date'] - most_recent_prior['event_date']).days
+
+        return {
+            'customer_id': customer_id,
+            'flag_type': self.flag_type,
+            'triggered_date': today,
+            'flag_data': {
+                'membership_start_date': most_recent_start['event_date'].isoformat(),
+                'days_since_start': (today - most_recent_start['event_date']).days,
+                'membership_name': membership_data.get('membership_name', ''),
+                'membership_id': membership_data.get('membership_id', ''),
+                'is_first_time_member': is_first_time_member,
+                'days_since_last_membership': days_since_last_membership,
+                'description': self.description
+            },
+            'priority': self.priority
+        }
+
+
 class ActiveMembershipFlag(FlagRule):
     """
     Flag customers who have an active membership.
@@ -1373,6 +1504,7 @@ ACTIVE_RULES = [
     BirthdayPartyHostSixDaysOutFlag(),     # Host notification (6 days before)
     FiftyPercentOfferSentFlag(),           # Track 50% offer email sends
     MembershipCancelledWinbackFlag(),      # Win-back for cancelled members
+    NewMemberFlag(),                       # New member (after 6+ month gap)
     ActiveMembershipFlag(),                # PERSISTENT: active-membership status
 ]
 
