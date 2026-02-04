@@ -324,7 +324,7 @@ class FirstTimeDayPass2WeekOfferFlag(FlagRule):
             'triggered_date': today,
             'flag_data': {
                 'ab_group': 'A',
-                'experiment_id': 'day_pass_conversion_2026_01',
+                'experiment_id': 'day_pass_conversion_2026_02',
                 'most_recent_checkin_date': most_recent_checkin['event_date'].isoformat(),
                 'days_since_checkin': (today - most_recent_checkin['event_date']).days,
                 'total_day_pass_checkins': len(day_pass_checkins),
@@ -458,7 +458,7 @@ class SecondVisitOfferEligibleFlag(FlagRule):
             'triggered_date': today,
             'flag_data': {
                 'ab_group': 'B',
-                'experiment_id': 'day_pass_conversion_2026_01',
+                'experiment_id': 'day_pass_conversion_2026_02',
                 'most_recent_checkin_date': most_recent_checkin['event_date'].isoformat(),
                 'days_since_checkin': (today - most_recent_checkin['event_date']).days,
                 'total_day_pass_checkins': len(day_pass_checkins),
@@ -572,7 +572,7 @@ class SecondVisit2WeekOfferFlag(FlagRule):
             'triggered_date': today,
             'flag_data': {
                 'ab_group': 'B',
-                'experiment_id': 'day_pass_conversion_2026_01',
+                'experiment_id': 'day_pass_conversion_2026_02',
                 'second_pass_flag_date': flag_date.isoformat(),
                 'return_visit_date': first_return_checkin['event_date'].isoformat(),
                 'days_to_return': (first_return_checkin['event_date'] - flag_date).days,
