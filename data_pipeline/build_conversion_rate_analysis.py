@@ -1,26 +1,26 @@
 """
 Build Conversion Rate Analysis
 
-Creates two outputs for analyzing day pass to membership conversion:
+Creates outputs for analyzing day pass to membership conversion:
 
 1. day_pass_visits_enriched.csv - Each day pass visit with:
-   - visit_number (1st, 2nd, 3rd... for this customer)
+   - visit_number (all-time for this customer)
+   - visit_num_60d (visits in rolling 60-day window)
    - cohort_month (YYYY-MM)
-   - converted (boolean)
-   - conversion_date (if converted)
-   - days_to_conversion
+   - ab_group (A or B from experiment)
+   - treatment_flag (which flag they received)
+   - converted_to_2wk_* (2-week pass conversion at various windows)
+   - converted_to_member_* (full membership conversion at various windows)
 
-2. conversion_cohorts.csv - Aggregated conversion rates by cohort:
-   - Unique customers per cohort
-   - Conversion counts at +1mo, +2mo, +3mo, +6mo, +12mo
-   - Conversion rates at each window
-   - Both "first_visit" and "all_visits" cohort types
+2. conversion_cohorts.csv - Aggregated conversion rates by cohort
+
+3. conversion_snapshots.csv - Weekly/monthly snapshot metrics
 """
 
 import pandas as pd
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 # Add parent directory to path
@@ -29,17 +29,29 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_pipeline import upload_data, config
 
 
+def get_ab_group_from_customer_id(customer_id):
+    """
+    Determine AB group based on customer_id last digit.
+    Group A: last digit 0-4
+    Group B: last digit 5-9
+    """
+    try:
+        last_digit = int(str(customer_id)[-1])
+        return 'A' if last_digit <= 4 else 'B'
+    except (ValueError, IndexError):
+        return None
+
+
 def build_day_pass_visits_enriched():
     """
     Build enriched day pass visits table with conversion tracking.
 
     Returns:
         DataFrame with one row per day pass visit, enriched with:
-        - visit_number
-        - cohort_month
-        - converted
-        - conversion_date
-        - days_to_conversion
+        - visit_number (all-time)
+        - visit_num_60d (rolling 60-day window)
+        - ab_group, treatment_flag
+        - converted_to_2wk_* and converted_to_member_* at various windows
     """
     print("=" * 60)
     print("Building Day Pass Visits Enriched Table")
@@ -59,6 +71,39 @@ def build_day_pass_visits_enriched():
     df_memberships = uploader.convert_csv_to_df(csv_content)
     print(f"   Loaded {len(df_memberships):,} memberships")
 
+    # Load experiment entries for AB group
+    print("\n📥 Loading experiment entries...")
+    try:
+        csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_experiment_entries)
+        df_experiments = uploader.convert_csv_to_df(csv_content)
+        experiment_lookup = dict(zip(df_experiments['customer_id'].astype(str), df_experiments['group']))
+        experiment_flag_lookup = dict(zip(df_experiments['customer_id'].astype(str), df_experiments['entry_flag']))
+        print(f"   Loaded {len(df_experiments):,} experiment entries")
+    except Exception as e:
+        print(f"   ⚠️ Could not load experiment entries: {e}")
+        experiment_lookup = {}
+        experiment_flag_lookup = {}
+
+    # Load customer flags for treatment tracking
+    print("\n📥 Loading customer flags...")
+    try:
+        csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customer_flags)
+        df_flags = uploader.convert_csv_to_df(csv_content)
+        # Get treatment flags (2wk offer flags)
+        treatment_flags = df_flags[df_flags['flag_type'].isin([
+            'first_time_day_pass_2wk_offer',
+            'second_visit_offer_eligible',
+            'second_visit_2wk_offer'
+        ])]
+        treatment_flag_lookup = dict(zip(
+            treatment_flags['customer_id'].astype(str),
+            treatment_flags['flag_type']
+        ))
+        print(f"   Loaded {len(treatment_flags):,} treatment flags")
+    except Exception as e:
+        print(f"   ⚠️ Could not load customer flags: {e}")
+        treatment_flag_lookup = {}
+
     # Prepare check-ins
     df_checkins['checkin_datetime'] = pd.to_datetime(df_checkins['checkin_datetime'], errors='coerce', utc=True)
     df_checkins = df_checkins[df_checkins['checkin_datetime'].notna()].copy()
@@ -72,24 +117,40 @@ def build_day_pass_visits_enriched():
     ].copy()
     print(f"   Found {len(df_day_pass):,} day pass check-ins")
 
-    # Filter to Sept 2025 onwards
+    # Filter to Sept 2024 onwards
     start_date = pd.Timestamp('2024-09-01')
     df_day_pass = df_day_pass[df_day_pass['checkin_datetime'] >= start_date].copy()
     print(f"   After filtering to Sept 2024+: {len(df_day_pass):,} check-ins")
 
-    # Prepare membership data - get first membership per customer
-    print("\n📊 Building membership lookup...")
+    # Prepare membership data
+    print("\n📊 Building membership lookups...")
     df_memberships['start_date'] = pd.to_datetime(df_memberships['start_date'], errors='coerce')
     df_memberships = df_memberships[df_memberships['start_date'].notna()].copy()
 
-    # Get first membership for each customer
-    df_memberships_sorted = df_memberships.sort_values('start_date')
-    df_first_membership = df_memberships_sorted.groupby('owner_id').first().reset_index()
-    first_membership_lookup = dict(zip(
-        df_first_membership['owner_id'],
-        df_first_membership['start_date']
-    ))
-    print(f"   Found {len(first_membership_lookup):,} customers with memberships")
+    # Separate 2-week passes from full memberships
+    two_week_keywords = ['2-week', '2 week', 'two week', '2wk']
+    df_memberships['is_2_week'] = df_memberships['name'].str.lower().str.contains(
+        '|'.join(two_week_keywords), na=False
+    )
+
+    df_2week = df_memberships[df_memberships['is_2_week']].copy()
+    df_full_member = df_memberships[~df_memberships['is_2_week']].copy()
+
+    print(f"   2-week passes: {len(df_2week):,}")
+    print(f"   Full memberships: {len(df_full_member):,}")
+
+    # Build lookup for first 2-week pass per customer
+    df_2week_sorted = df_2week.sort_values('start_date')
+    df_first_2week = df_2week_sorted.groupby('owner_id').first().reset_index()
+    first_2week_lookup = dict(zip(df_first_2week['owner_id'], df_first_2week['start_date']))
+
+    # Build lookup for first full membership per customer
+    df_full_sorted = df_full_member.sort_values('start_date')
+    df_first_full = df_full_sorted.groupby('owner_id').first().reset_index()
+    first_full_lookup = dict(zip(df_first_full['owner_id'], df_first_full['start_date']))
+
+    print(f"   Customers with 2-week pass: {len(first_2week_lookup):,}")
+    print(f"   Customers with full membership: {len(first_full_lookup):,}")
 
     # Build membership periods for checking if someone was a member at checkin time
     membership_periods = {}
@@ -102,8 +163,18 @@ def build_day_pass_visits_enriched():
                 membership_periods[customer_id] = []
             membership_periods[customer_id].append((start, end if pd.notna(end) else pd.Timestamp.max))
 
-    # Sort day passes by customer and date to calculate visit number
+    # Sort day passes by customer and date
     df_day_pass = df_day_pass.sort_values(['customer_id', 'checkin_datetime'])
+
+    # Build customer visit history for 60-day lookback
+    print("\n🔄 Building customer visit history...")
+    customer_visits = {}
+    for _, row in df_day_pass.iterrows():
+        customer_id = row['customer_id']
+        visit_dt = row['checkin_datetime']
+        if customer_id not in customer_visits:
+            customer_visits[customer_id] = []
+        customer_visits[customer_id].append(visit_dt)
 
     # Process each day pass visit
     print("\n🔄 Enriching day pass visits...")
@@ -111,6 +182,7 @@ def build_day_pass_visits_enriched():
     customer_visit_counts = {}
     processed = 0
     total = len(df_day_pass)
+    today = pd.Timestamp.now()
 
     for _, checkin in df_day_pass.iterrows():
         customer_id = checkin['customer_id']
@@ -128,27 +200,64 @@ def build_day_pass_visits_enriched():
         if was_member_at_checkin:
             continue  # Skip - they were already a member
 
-        # Calculate visit number for this customer
+        # Calculate visit number (all-time)
         if customer_id not in customer_visit_counts:
             customer_visit_counts[customer_id] = 0
         customer_visit_counts[customer_id] += 1
         visit_number = customer_visit_counts[customer_id]
 
+        # Calculate visit number in 60-day rolling window
+        sixty_days_ago = checkin_dt - timedelta(days=60)
+        visits_in_window = [
+            v for v in customer_visits.get(customer_id, [])
+            if sixty_days_ago < v <= checkin_dt
+        ]
+        visit_num_60d = len(visits_in_window)
+
+        # Categorize: 1, 2, or 3+
+        visit_category_60d = '3+' if visit_num_60d >= 3 else str(visit_num_60d)
+
         # Determine cohort month
         cohort_month = checkin_dt.strftime('%Y-%m')
 
-        # Check if this customer eventually converted
-        first_membership_date = first_membership_lookup.get(customer_id)
+        # Get AB group (from experiment or derived from customer_id)
+        customer_id_str = str(customer_id)
+        ab_group = experiment_lookup.get(customer_id_str) or get_ab_group_from_customer_id(customer_id)
 
-        # Only count as converted if membership started AFTER this day pass visit
-        if first_membership_date and first_membership_date > checkin_dt:
-            converted = True
-            conversion_date = first_membership_date
-            days_to_conversion = (first_membership_date - checkin_dt).days
+        # Get treatment flag
+        treatment_flag = treatment_flag_lookup.get(customer_id_str) or experiment_flag_lookup.get(customer_id_str)
+
+        # Check 2-week pass conversion
+        first_2week_date = first_2week_lookup.get(customer_id)
+        if first_2week_date and first_2week_date > checkin_dt:
+            days_to_2wk = (first_2week_date - checkin_dt).days
+            converted_2wk_7d = days_to_2wk <= 7
+            converted_2wk_30d = days_to_2wk <= 30
+            converted_2wk_60d = days_to_2wk <= 60
+            converted_2wk_ever = True
         else:
-            converted = False
-            conversion_date = None
-            days_to_conversion = None
+            days_to_2wk = None
+            converted_2wk_7d = False
+            converted_2wk_30d = False
+            converted_2wk_60d = False
+            converted_2wk_ever = False
+
+        # Check full membership conversion
+        first_member_date = first_full_lookup.get(customer_id)
+        if first_member_date and first_member_date > checkin_dt:
+            days_to_member = (first_member_date - checkin_dt).days
+            converted_member_7d = days_to_member <= 7
+            converted_member_30d = days_to_member <= 30
+            converted_member_60d = days_to_member <= 60
+            converted_member_90d = days_to_member <= 90
+            converted_member_ever = True
+        else:
+            days_to_member = None
+            converted_member_7d = False
+            converted_member_30d = False
+            converted_member_60d = False
+            converted_member_90d = False
+            converted_member_ever = False
 
         enriched_data.append({
             'checkin_id': checkin_id,
@@ -159,10 +268,30 @@ def build_day_pass_visits_enriched():
             'visit_date': checkin_dt.date(),
             'visit_datetime': checkin_dt,
             'visit_number': visit_number,
+            'visit_num_60d': visit_num_60d,
+            'visit_category_60d': visit_category_60d,
             'cohort_month': cohort_month,
-            'converted': converted,
-            'conversion_date': conversion_date,
-            'days_to_conversion': days_to_conversion,
+            'ab_group': ab_group,
+            'treatment_flag': treatment_flag,
+            # 2-week pass conversion
+            'converted_2wk_7d': converted_2wk_7d,
+            'converted_2wk_30d': converted_2wk_30d,
+            'converted_2wk_60d': converted_2wk_60d,
+            'converted_2wk_ever': converted_2wk_ever,
+            'days_to_2wk': days_to_2wk,
+            'conversion_2wk_date': first_2week_date if converted_2wk_ever else None,
+            # Full membership conversion
+            'converted_member_7d': converted_member_7d,
+            'converted_member_30d': converted_member_30d,
+            'converted_member_60d': converted_member_60d,
+            'converted_member_90d': converted_member_90d,
+            'converted_member_ever': converted_member_ever,
+            'days_to_member': days_to_member,
+            'conversion_member_date': first_member_date if converted_member_ever else None,
+            # Legacy fields for compatibility
+            'converted': converted_member_ever or converted_2wk_ever,
+            'conversion_date': first_2week_date if converted_2wk_ever else (first_member_date if converted_member_ever else None),
+            'days_to_conversion': days_to_2wk if converted_2wk_ever else (days_to_member if converted_member_ever else None),
             'entry_method_description': checkin.get('entry_method_description', '')
         })
 
@@ -174,13 +303,23 @@ def build_day_pass_visits_enriched():
 
     print(f"\n✅ Built enriched table with {len(df_enriched):,} day pass visits")
     print(f"   Unique customers: {df_enriched['customer_id'].nunique():,}")
-    print(f"   Converted: {df_enriched['converted'].sum():,} visits from customers who later converted")
 
-    # Show visit number distribution
-    visit_dist = df_enriched['visit_number'].value_counts().sort_index().head(10)
-    print(f"\n   Visit number distribution:")
-    for visit_num, count in visit_dist.items():
-        print(f"      Visit #{visit_num}: {count:,}")
+    # Show summary stats
+    print(f"\n   60-day visit category distribution:")
+    for cat in ['1', '2', '3+']:
+        count = len(df_enriched[df_enriched['visit_category_60d'] == cat])
+        pct = count / len(df_enriched) * 100
+        print(f"      {cat}: {count:,} entries ({pct:.1f}%)")
+
+    print(f"\n   AB Group distribution:")
+    for grp in ['A', 'B']:
+        count = len(df_enriched[df_enriched['ab_group'] == grp])
+        pct = count / len(df_enriched) * 100
+        print(f"      Group {grp}: {count:,} entries ({pct:.1f}%)")
+
+    print(f"\n   Conversion summary:")
+    print(f"      2-week pass (ever): {df_enriched['converted_2wk_ever'].sum():,}")
+    print(f"      Full membership (ever): {df_enriched['converted_member_ever'].sum():,}")
 
     return df_enriched
 
@@ -205,11 +344,10 @@ def build_conversion_cohorts(df_enriched):
 
     # Time windows in days
     time_windows = {
-        '1mo': 30,
-        '2mo': 60,
-        '3mo': 90,
-        '6mo': 180,
-        '12mo': 365
+        '7d': 7,
+        '30d': 30,
+        '60d': 60,
+        '90d': 90
     }
 
     cohort_data = []
@@ -222,87 +360,74 @@ def build_conversion_cohorts(df_enriched):
     for cohort_month in cohort_months:
         cohort_start = pd.Timestamp(f"{cohort_month}-01")
 
-        # --- FIRST VISIT ONLY cohort ---
-        # Get customers whose FIRST day pass visit was in this month
-        first_visits = df_enriched[df_enriched['visit_number'] == 1].copy()
-        first_visit_cohort = first_visits[first_visits['cohort_month'] == cohort_month]
+        # For each visit category (1st, 2nd, 3+)
+        for visit_cat in ['1', '2', '3+']:
+            cohort_visits = df_enriched[
+                (df_enriched['cohort_month'] == cohort_month) &
+                (df_enriched['visit_category_60d'] == visit_cat)
+            ]
 
-        unique_customers_first = first_visit_cohort['customer_id'].nunique()
+            if len(cohort_visits) == 0:
+                continue
 
-        if unique_customers_first > 0:
-            row_first = {
+            unique_customers = cohort_visits['customer_id'].nunique()
+            total_entries = len(cohort_visits)
+
+            row = {
                 'cohort_month': cohort_month,
-                'cohort_type': 'first_visit',
-                'unique_customers': unique_customers_first
+                'visit_category': visit_cat,
+                'total_entries': total_entries,
+                'unique_customers': unique_customers
             }
 
-            for window_name, window_days in time_windows.items():
-                window_end = cohort_start + pd.Timedelta(days=window_days + 30)  # +30 to cover full month
-
-                # Check if we have enough data for this window
-                if today >= window_end:
-                    # Count conversions within window
-                    converted = first_visit_cohort[
-                        (first_visit_cohort['converted'] == True) &
-                        (first_visit_cohort['days_to_conversion'] <= window_days)
-                    ]['customer_id'].nunique()
-
-                    rate = (converted / unique_customers_first * 100) if unique_customers_first > 0 else 0
-                else:
-                    converted = None
-                    rate = None
-
-                row_first[f'converted_{window_name}'] = converted
-                row_first[f'rate_{window_name}'] = round(rate, 2) if rate is not None else None
-
-            cohort_data.append(row_first)
-
-        # --- ALL VISITS cohort ---
-        # Get all customers who visited (as day pass) in this month
-        all_visits_cohort = df_enriched[df_enriched['cohort_month'] == cohort_month]
-        unique_customers_all = all_visits_cohort['customer_id'].nunique()
-
-        if unique_customers_all > 0:
-            row_all = {
-                'cohort_month': cohort_month,
-                'cohort_type': 'all_visits',
-                'unique_customers': unique_customers_all
-            }
-
+            # Calculate conversion rates for each window
             for window_name, window_days in time_windows.items():
                 window_end = cohort_start + pd.Timedelta(days=window_days + 30)
 
                 if today >= window_end:
-                    # For all_visits, we need to check conversion relative to any visit in that month
-                    # Get unique customers who converted within window of their visit in this cohort month
-                    converted_customers = all_visits_cohort[
-                        (all_visits_cohort['converted'] == True) &
-                        (all_visits_cohort['days_to_conversion'] <= window_days)
-                    ]['customer_id'].nunique()
+                    # 2-week pass conversions
+                    col_2wk = f'converted_2wk_{window_name}' if window_name != '90d' else 'converted_2wk_60d'
+                    if col_2wk in cohort_visits.columns:
+                        converted_2wk_entries = cohort_visits[col_2wk].sum()
+                        converted_2wk_customers = cohort_visits[cohort_visits[col_2wk]]['customer_id'].nunique()
+                    else:
+                        converted_2wk_entries = 0
+                        converted_2wk_customers = 0
 
-                    rate = (converted_customers / unique_customers_all * 100) if unique_customers_all > 0 else 0
+                    # Full membership conversions
+                    col_member = f'converted_member_{window_name}'
+                    if col_member in cohort_visits.columns:
+                        converted_member_entries = cohort_visits[col_member].sum()
+                        converted_member_customers = cohort_visits[cohort_visits[col_member]]['customer_id'].nunique()
+                    else:
+                        converted_member_entries = 0
+                        converted_member_customers = 0
+
+                    row[f'converted_2wk_{window_name}_entries'] = int(converted_2wk_entries)
+                    row[f'converted_2wk_{window_name}_customers'] = converted_2wk_customers
+                    row[f'converted_member_{window_name}_entries'] = int(converted_member_entries)
+                    row[f'converted_member_{window_name}_customers'] = converted_member_customers
+
+                    # Rates (per entry and per customer)
+                    row[f'rate_2wk_{window_name}_by_entry'] = round(converted_2wk_entries / total_entries * 100, 2) if total_entries > 0 else 0
+                    row[f'rate_2wk_{window_name}_by_customer'] = round(converted_2wk_customers / unique_customers * 100, 2) if unique_customers > 0 else 0
+                    row[f'rate_member_{window_name}_by_entry'] = round(converted_member_entries / total_entries * 100, 2) if total_entries > 0 else 0
+                    row[f'rate_member_{window_name}_by_customer'] = round(converted_member_customers / unique_customers * 100, 2) if unique_customers > 0 else 0
                 else:
-                    converted_customers = None
-                    rate = None
+                    row[f'converted_2wk_{window_name}_entries'] = None
+                    row[f'converted_2wk_{window_name}_customers'] = None
+                    row[f'converted_member_{window_name}_entries'] = None
+                    row[f'converted_member_{window_name}_customers'] = None
+                    row[f'rate_2wk_{window_name}_by_entry'] = None
+                    row[f'rate_2wk_{window_name}_by_customer'] = None
+                    row[f'rate_member_{window_name}_by_entry'] = None
+                    row[f'rate_member_{window_name}_by_customer'] = None
 
-                row_all[f'converted_{window_name}'] = converted_customers
-                row_all[f'rate_{window_name}'] = round(rate, 2) if rate is not None else None
-
-            cohort_data.append(row_all)
+            cohort_data.append(row)
 
     df_cohorts = pd.DataFrame(cohort_data)
 
     print(f"\n✅ Built cohort table with {len(df_cohorts)} rows")
-
-    # Show summary
-    if not df_cohorts.empty:
-        print("\n   First-visit cohort summary (most recent 3 months with full data):")
-        first_visit_cohorts = df_cohorts[df_cohorts['cohort_type'] == 'first_visit'].tail(6).head(3)
-        for _, row in first_visit_cohorts.iterrows():
-            rate_1mo = row.get('rate_1mo', 'N/A')
-            rate_3mo = row.get('rate_3mo', 'N/A')
-            print(f"      {row['cohort_month']}: {row['unique_customers']} customers, "
-                  f"1mo: {rate_1mo}%, 3mo: {rate_3mo}%")
 
     return df_cohorts
 
@@ -326,25 +451,6 @@ def build_snapshot_metrics(df_enriched):
         print("   No data to process")
         return pd.DataFrame()
 
-    uploader = upload_data.DataUploader()
-
-    # Load memberships for new membership counts
-    print("\n📥 Loading membership data for new membership counts...")
-    csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_capitan_memberships)
-    df_memberships = uploader.convert_csv_to_df(csv_content)
-
-    df_memberships['start_date'] = pd.to_datetime(df_memberships['start_date'], errors='coerce')
-    df_memberships = df_memberships[df_memberships['start_date'].notna()].copy()
-
-    # Get first membership per customer (new memberships only)
-    df_memberships_sorted = df_memberships.sort_values('start_date')
-    df_first_memberships = df_memberships_sorted.groupby('owner_id').first().reset_index()
-
-    # Filter to Sept 2024+
-    start_date = pd.Timestamp('2024-09-01')
-    df_first_memberships = df_first_memberships[df_first_memberships['start_date'] >= start_date]
-    print(f"   Found {len(df_first_memberships):,} new memberships since Sept 2024")
-
     snapshot_data = []
 
     # Create date for visits
@@ -352,69 +458,89 @@ def build_snapshot_metrics(df_enriched):
 
     # --- MONTHLY metrics ---
     print("\n📊 Calculating monthly metrics...")
-    df_enriched['month'] = df_enriched['visit_date'].dt.to_period('M')
-    df_first_memberships['month'] = df_first_memberships['start_date'].dt.to_period('M')
+    df_enriched['month'] = df_enriched['visit_date'].dt.to_period('M').astype(str)
 
     months = sorted(df_enriched['month'].unique())
 
     for month in months:
-        month_str = str(month)
+        month_data = df_enriched[df_enriched['month'] == month]
 
-        # Unique day pass customers this month
-        day_pass_customers = df_enriched[df_enriched['month'] == month]['customer_id'].nunique()
+        for visit_cat in ['1', '2', '3+', 'all']:
+            if visit_cat == 'all':
+                cat_data = month_data
+            else:
+                cat_data = month_data[month_data['visit_category_60d'] == visit_cat]
 
-        # New memberships this month
-        new_memberships = len(df_first_memberships[df_first_memberships['month'] == month])
+            if len(cat_data) == 0:
+                continue
 
-        # Conversion rate
-        rate = (new_memberships / day_pass_customers * 100) if day_pass_customers > 0 else 0
+            total_entries = len(cat_data)
+            unique_customers = cat_data['customer_id'].nunique()
 
-        snapshot_data.append({
-            'period': month_str,
-            'period_type': 'monthly',
-            'unique_day_pass_customers': day_pass_customers,
-            'new_memberships': new_memberships,
-            'conversion_rate': round(rate, 2)
-        })
+            snapshot_data.append({
+                'period': month,
+                'period_type': 'monthly',
+                'visit_category': visit_cat,
+                'total_entries': total_entries,
+                'unique_customers': unique_customers,
+                'converted_2wk_entries': int(cat_data['converted_2wk_ever'].sum()),
+                'converted_2wk_customers': cat_data[cat_data['converted_2wk_ever']]['customer_id'].nunique(),
+                'converted_member_entries': int(cat_data['converted_member_ever'].sum()),
+                'converted_member_customers': cat_data[cat_data['converted_member_ever']]['customer_id'].nunique(),
+                'rate_2wk_by_entry': round(cat_data['converted_2wk_ever'].sum() / total_entries * 100, 2),
+                'rate_2wk_by_customer': round(cat_data[cat_data['converted_2wk_ever']]['customer_id'].nunique() / unique_customers * 100, 2) if unique_customers > 0 else 0,
+                'rate_member_by_entry': round(cat_data['converted_member_ever'].sum() / total_entries * 100, 2),
+                'rate_member_by_customer': round(cat_data[cat_data['converted_member_ever']]['customer_id'].nunique() / unique_customers * 100, 2) if unique_customers > 0 else 0,
+            })
 
     # --- WEEKLY metrics ---
     print("📊 Calculating weekly metrics...")
-    df_enriched['week'] = df_enriched['visit_date'].dt.to_period('W')
-    df_first_memberships['week'] = df_first_memberships['start_date'].dt.to_period('W')
+    df_enriched['week'] = df_enriched['visit_date'].dt.to_period('W').astype(str)
 
     weeks = sorted(df_enriched['week'].unique())
 
     for week in weeks:
-        week_str = str(week)
+        week_data = df_enriched[df_enriched['week'] == week]
 
-        # Unique day pass customers this week
-        day_pass_customers = df_enriched[df_enriched['week'] == week]['customer_id'].nunique()
+        for visit_cat in ['1', '2', '3+', 'all']:
+            if visit_cat == 'all':
+                cat_data = week_data
+            else:
+                cat_data = week_data[week_data['visit_category_60d'] == visit_cat]
 
-        # New memberships this week
-        new_memberships = len(df_first_memberships[df_first_memberships['week'] == week])
+            if len(cat_data) == 0:
+                continue
 
-        # Conversion rate
-        rate = (new_memberships / day_pass_customers * 100) if day_pass_customers > 0 else 0
+            total_entries = len(cat_data)
+            unique_customers = cat_data['customer_id'].nunique()
 
-        snapshot_data.append({
-            'period': week_str,
-            'period_type': 'weekly',
-            'unique_day_pass_customers': day_pass_customers,
-            'new_memberships': new_memberships,
-            'conversion_rate': round(rate, 2)
-        })
+            snapshot_data.append({
+                'period': week,
+                'period_type': 'weekly',
+                'visit_category': visit_cat,
+                'total_entries': total_entries,
+                'unique_customers': unique_customers,
+                'converted_2wk_entries': int(cat_data['converted_2wk_ever'].sum()),
+                'converted_2wk_customers': cat_data[cat_data['converted_2wk_ever']]['customer_id'].nunique(),
+                'converted_member_entries': int(cat_data['converted_member_ever'].sum()),
+                'converted_member_customers': cat_data[cat_data['converted_member_ever']]['customer_id'].nunique(),
+                'rate_2wk_by_entry': round(cat_data['converted_2wk_ever'].sum() / total_entries * 100, 2),
+                'rate_2wk_by_customer': round(cat_data[cat_data['converted_2wk_ever']]['customer_id'].nunique() / unique_customers * 100, 2) if unique_customers > 0 else 0,
+                'rate_member_by_entry': round(cat_data['converted_member_ever'].sum() / total_entries * 100, 2),
+                'rate_member_by_customer': round(cat_data[cat_data['converted_member_ever']]['customer_id'].nunique() / unique_customers * 100, 2) if unique_customers > 0 else 0,
+            })
 
     df_snapshots = pd.DataFrame(snapshot_data)
-    df_snapshots = df_snapshots.sort_values(['period_type', 'period'])
+    df_snapshots = df_snapshots.sort_values(['period_type', 'period', 'visit_category'])
 
     print(f"\n✅ Built snapshot metrics: {len(df_snapshots)} rows")
 
     # Show recent monthly summary
-    monthly = df_snapshots[df_snapshots['period_type'] == 'monthly'].tail(3)
-    print("\n   Recent monthly conversion rates:")
+    monthly = df_snapshots[(df_snapshots['period_type'] == 'monthly') & (df_snapshots['visit_category'] == 'all')].tail(3)
+    print("\n   Recent monthly conversion rates (all visits):")
     for _, row in monthly.iterrows():
-        print(f"      {row['period']}: {row['unique_day_pass_customers']} day pass customers, "
-              f"{row['new_memberships']} new members, {row['conversion_rate']}% rate")
+        print(f"      {row['period']}: {row['unique_customers']} customers, "
+              f"2wk: {row['rate_2wk_by_customer']}%, member: {row['rate_member_by_customer']}%")
 
     return df_snapshots
 
@@ -432,6 +558,10 @@ def upload_conversion_rate_analysis(save_local=False):
     if df_enriched.empty:
         print("\n⚠️  No data to process")
         return
+
+    # Add month/week columns for snapshot metrics
+    df_enriched['month'] = pd.to_datetime(df_enriched['visit_date']).dt.to_period('M').astype(str)
+    df_enriched['week'] = pd.to_datetime(df_enriched['visit_date']).dt.to_period('W').astype(str)
 
     # Build cohorts
     df_cohorts = build_conversion_cohorts(df_enriched)
