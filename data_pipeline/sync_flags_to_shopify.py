@@ -97,6 +97,11 @@ class ShopifyFlagSyncer:
             '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer list
         }
 
+        # Additional tags to add alongside the primary tag (for aliases/variations)
+        self.additional_tags_map = {
+            'new_member': ['new-membership'],  # Add both new-member and new-membership
+        }
+
         # Sync history log path
         self.sync_history_key = "shopify/sync_history.csv"
 
@@ -1441,6 +1446,18 @@ class ShopifyFlagSyncer:
                     if success:
                         synced += 1
                         print(f"   ✅ Added tag '{tag_name}' to customer {capitan_id} (Shopify ID: {shopify_id})")
+
+                        # Add any additional/alias tags for this flag
+                        additional_tags = self.additional_tags_map.get(flag_name, [])
+                        for extra_tag in additional_tags:
+                            extra_success = self.add_customer_tag(
+                                shopify_customer_id=shopify_id,
+                                tag=extra_tag,
+                                capitan_customer_id=capitan_id,
+                                email=str(email) if email and pd.notna(email) else None
+                            )
+                            if extra_success:
+                                print(f"   ✅ Added additional tag '{extra_tag}' to customer {capitan_id}")
 
                         # Queue the "-sent" tag to be added after delay
                         # This gives Shopify Flow time to trigger before we mark as sent
