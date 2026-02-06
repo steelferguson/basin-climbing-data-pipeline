@@ -127,6 +127,87 @@ def extract_email_domain(email: str) -> Optional[str]:
     return email.split('@')[-1].lower()
 
 
+# Common domain typos and their corrections
+DOMAIN_TYPO_CORRECTIONS = {
+    # .com typos
+    'con': 'com',
+    'cmo': 'com',
+    'ocm': 'com',
+    'om': 'com',
+    'comm': 'com',
+    'xom': 'com',
+    'vom': 'com',
+    'coм': 'com',  # Cyrillic м
+    # .org typos
+    'og': 'org',
+    'ogr': 'org',
+    'rog': 'org',
+    # .net typos
+    'ner': 'net',
+    'nte': 'net',
+    'met': 'net',
+    # .edu typos
+    'eud': 'edu',
+    'deu': 'edu',
+}
+
+
+def fix_domain_typo(domain: str) -> str:
+    """
+    Fix common typos in email domain TLDs.
+
+    Args:
+        domain: Email domain (e.g., 'icloud.con')
+
+    Returns:
+        Corrected domain (e.g., 'icloud.com')
+
+    Examples:
+        'gmail.con' -> 'gmail.com'
+        'icloud.cmo' -> 'icloud.com'
+        'yahoo.og' -> 'yahoo.org'
+    """
+    if not domain:
+        return domain
+
+    domain = domain.lower()
+
+    # Split into parts
+    parts = domain.rsplit('.', 1)
+    if len(parts) != 2:
+        return domain
+
+    base, tld = parts
+
+    # Check if TLD is a common typo
+    if tld in DOMAIN_TYPO_CORRECTIONS:
+        corrected_tld = DOMAIN_TYPO_CORRECTIONS[tld]
+        return f"{base}.{corrected_tld}"
+
+    return domain
+
+
+def domains_match_with_typo_tolerance(domain1: str, domain2: str) -> bool:
+    """
+    Check if two domains match, allowing for common TLD typos.
+
+    Args:
+        domain1: First domain
+        domain2: Second domain
+
+    Returns:
+        True if domains match (after typo correction)
+    """
+    if not domain1 or not domain2:
+        return False
+
+    # Fix typos in both
+    fixed1 = fix_domain_typo(domain1)
+    fixed2 = fix_domain_typo(domain2)
+
+    return fixed1 == fixed2
+
+
 class CustomerMatcher:
     """
     Main customer matching engine.
@@ -353,9 +434,11 @@ class CustomerMatcher:
             for existing_email, customer_id in self.email_index.items():
                 similarity = calculate_email_similarity(email, existing_email)
 
-                # If very similar (90%+) and same domain
+                # If very similar (90%+) and same domain (with typo tolerance)
                 if similarity >= 0.90:
-                    if extract_email_domain(email) == extract_email_domain(existing_email):
+                    domain1 = extract_email_domain(email)
+                    domain2 = extract_email_domain(existing_email)
+                    if domains_match_with_typo_tolerance(domain1, domain2):
                         return customer_id, 'low', f'fuzzy_email_{int(similarity*100)}'
 
         # No match found
