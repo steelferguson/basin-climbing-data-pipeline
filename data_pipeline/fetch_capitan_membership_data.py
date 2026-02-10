@@ -100,6 +100,7 @@ class CapitanDataFetcher:
         is_team_dues = "team dues" in name or "team-dues" in name
         is_bcf = "bcf" in name or "staff" in name
         is_90_for_90 = "90 for 90" in name
+        is_2_week_pass = "2-week" in name or "2 week" in name or "two week" in name or "2wk" in name
         special_categories = [
             is_founder,
             is_college,
@@ -110,6 +111,7 @@ class CapitanDataFetcher:
             is_team_dues,
             is_90_for_90,
             is_bcf,
+            is_2_week_pass,
         ]
         is_not_in_special = not any(special_categories)
 
@@ -161,6 +163,7 @@ class CapitanDataFetcher:
             "is_team_dues": is_team_dues,
             "is_bcf": is_bcf,
             "is_90_for_90": is_90_for_90,
+            "is_2_week_pass": is_2_week_pass,
             "is_not_in_special": is_not_in_special,
         }
 

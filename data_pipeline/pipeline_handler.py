@@ -320,6 +320,16 @@ def upload_new_capitan_membership_data(save_local=False):
         return
     capitan_memberships_df = capitan_fetcher.process_membership_data(json_response)
     capitan_members_df = capitan_fetcher.process_member_data(json_response)
+
+    # Filter out 2-week passes from memberships (they are prepaid passes, not memberships)
+    if 'is_2_week_pass' in capitan_memberships_df.columns:
+        num_2week = capitan_memberships_df['is_2_week_pass'].sum()
+        capitan_memberships_df = capitan_memberships_df[~capitan_memberships_df['is_2_week_pass']].copy()
+        print(f"Filtered out {num_2week} 2-week passes from memberships data")
+
+    if 'is_2_week_pass' in capitan_members_df.columns:
+        capitan_members_df = capitan_members_df[~capitan_members_df['is_2_week_pass']].copy()
+
     membership_revenue_projection_df = capitan_fetcher.get_projection_table(
         capitan_memberships_df, months_ahead=3
     )
