@@ -97,7 +97,10 @@ class CapitanDataFetcher:
         is_mid_day = "mid-day" in name or "mid day" in name
         is_fitness_only = "fitness only" in name or "fitness-only" in name
         has_fitness_addon = "fitness" in name and not is_fitness_only
-        is_team_dues = "team dues" in name or "team-dues" in name
+        is_team_dues = (
+            "team dues" in name or "team-dues" in name or
+            "youth rec" in name or "youth comp" in name or "youth development" in name
+        )
         is_bcf = "bcf" in name or "staff" in name
         is_90_for_90 = "90 for 90" in name
         is_2_week_pass = "2-week" in name or "2 week" in name or "two week" in name or "2wk" in name
