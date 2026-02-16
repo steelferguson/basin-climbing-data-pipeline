@@ -185,10 +185,14 @@ class CustomerFlagsEngine:
         if today is None:
             today = datetime.now()
 
-        # Convert event dates to datetime if they're strings
+        # Convert event dates to datetime if they're strings (handle ISO8601 format)
         for event in events:
             if isinstance(event['event_date'], str):
-                event['event_date'] = pd.to_datetime(event['event_date'])
+                dt = pd.to_datetime(event['event_date'])
+                # Remove timezone info for consistent comparison
+                if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                event['event_date'] = dt
 
         # Sort events by date
         events_sorted = sorted(events, key=lambda e: e['event_date'])
@@ -261,8 +265,10 @@ class CustomerFlagsEngine:
                 'flag_data', 'priority'
             ])
 
-        # Convert event_date to datetime
-        df_events['event_date'] = pd.to_datetime(df_events['event_date'])
+        # Convert event_date to datetime (handle mixed formats including ISO8601)
+        # Use utc=True to handle mixed timezones, then convert to naive
+        df_events['event_date'] = pd.to_datetime(df_events['event_date'], format='mixed', utc=True)
+        df_events['event_date'] = df_events['event_date'].dt.tz_localize(None)
 
         # Group events by customer
         print(f"\n📊 Processing {df_events['customer_id'].nunique()} customers...")
@@ -421,7 +427,8 @@ class CustomerFlagsEngine:
         try:
             obj = s3_client.get_object(Bucket=bucket_name, Key='customers/customer_events.csv')
             df_events = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
-            df_events['event_date'] = pd.to_datetime(df_events['event_date'])
+            df_events['event_date'] = pd.to_datetime(df_events['event_date'], format='mixed', utc=True)
+            df_events['event_date'] = df_events['event_date'].dt.tz_localize(None)
 
             # Parse event_details JSON into event_data for purchase events
             # This makes purchase descriptions available to flag rules
@@ -508,7 +515,8 @@ class CustomerFlagsEngine:
             # Load existing customer events
             obj = s3_client.get_object(Bucket=bucket_name, Key='customers/customer_events.csv')
             df_existing_events = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
-            df_existing_events['event_date'] = pd.to_datetime(df_existing_events['event_date'])
+            df_existing_events['event_date'] = pd.to_datetime(df_existing_events['event_date'], format='mixed', utc=True)
+            df_existing_events['event_date'] = df_existing_events['event_date'].dt.tz_localize(None)
 
             # Create flag_set events for each new flag
             flag_events = []

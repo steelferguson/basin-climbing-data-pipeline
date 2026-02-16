@@ -18,6 +18,11 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_pipeline import pipeline_handler
+from data_pipeline.sync_klaviyo_flow_events import sync_klaviyo_flow_events
+from data_pipeline.sync_birthday_party_hosts_to_klaviyo import sync_completed_party_hosts
+from data_pipeline.sync_birthday_party_attendees_to_klaviyo import sync_completed_party_attendees
+from data_pipeline.customer_flags_engine import CustomerFlagsEngine
+from data_pipeline.sync_flags_to_shopify import ShopifyFlagSyncer
 
 def main():
     """Run daily customer master update."""
@@ -44,6 +49,53 @@ def main():
             day_pass_events['event_date'] = pd.to_datetime(day_pass_events['event_date'])
             latest_date = day_pass_events['event_date'].max()
             print(f"   - Latest day pass: {latest_date.strftime('%Y-%m-%d')}")
+
+        # Sync Klaviyo flow events
+        print("\n" + "-" * 80)
+        print("Syncing Klaviyo flow events...")
+        try:
+            klaviyo_result = sync_klaviyo_flow_events(days_back=7, dry_run=False)
+            print(f"   - Flow events added: {klaviyo_result.get('events_added', 0)}")
+        except Exception as e:
+            print(f"   - Warning: Klaviyo sync failed: {e}")
+
+        # Sync birthday party hosts to Klaviyo (post-party follow-up flow)
+        print("\n" + "-" * 80)
+        print("Syncing birthday party hosts to Klaviyo...")
+        try:
+            party_result = sync_completed_party_hosts(days_back=1, dry_run=False)
+            print(f"   - Hosts synced: {party_result.get('synced', 0)}")
+        except Exception as e:
+            print(f"   - Warning: Birthday party host sync failed: {e}")
+
+        # Sync birthday party attendees to Klaviyo (post-party follow-up flow)
+        print("\n" + "-" * 80)
+        print("Syncing birthday party attendees to Klaviyo...")
+        try:
+            attendee_result = sync_completed_party_attendees(days_back=1, dry_run=False)
+            print(f"   - Attendees synced: {attendee_result.get('synced', 0)}")
+        except Exception as e:
+            print(f"   - Warning: Birthday party attendee sync failed: {e}")
+
+        # Run customer flags engine (evaluates all flag rules)
+        print("\n" + "-" * 80)
+        print("Running customer flags engine...")
+        try:
+            flags_engine = CustomerFlagsEngine()
+            flags_engine.run()
+            print("   - Flags engine completed")
+        except Exception as e:
+            print(f"   - Warning: Flags engine failed: {e}")
+
+        # Sync flags to Shopify and Klaviyo
+        print("\n" + "-" * 80)
+        print("Syncing flags to Shopify and Klaviyo...")
+        try:
+            syncer = ShopifyFlagSyncer()
+            syncer.sync_flags_to_shopify(dry_run=False)
+            print("   - Flag sync completed")
+        except Exception as e:
+            print(f"   - Warning: Flag sync failed: {e}")
 
         print("=" * 80)
         return 0

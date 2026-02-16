@@ -21,12 +21,38 @@ import os
 # ============================================================================
 PERSISTENT_FLAGS: List[str] = [
     'active-membership',  # Stays until membership ends
+    'active-prepaid-pass',  # Stays until prepaid pass ends
+    'has-youth',  # Stays as long as customer has youth in family/membership
+]
+
+# ============================================================================
+# PREPAID PASSES - These are NOT counted as memberships for attrition purposes
+# They are time-limited passes that expire naturally (not "cancelled" or "churned")
+# ============================================================================
+PREPAID_PASS_KEYWORDS: List[str] = [
+    '2-week',
+    '2 week',
+    'two week',
+    '2-Week',
 ]
 
 
 def is_persistent_flag(flag_type: str) -> bool:
     """Check if a flag type is persistent (doesn't expire after 14 days)."""
     return flag_type in PERSISTENT_FLAGS
+
+
+def is_prepaid_pass(membership_name: str) -> bool:
+    """
+    Check if a membership name is a prepaid pass (not a regular membership).
+
+    Prepaid passes are time-limited passes that expire naturally.
+    They should NOT be counted as memberships for attrition purposes.
+    """
+    if not membership_name:
+        return False
+    name_lower = membership_name.lower()
+    return any(keyword.lower() in name_lower for keyword in PREPAID_PASS_KEYWORDS)
 
 
 def get_customer_ab_group(customer_id: str, email: Optional[str] = None, phone: Optional[str] = None) -> Literal["A", "B"]:
@@ -1012,6 +1038,94 @@ class BirthdayPartyHostSixDaysOutFlag(FlagRule):
             return None
 
 
+class BirthdayPartyHostCompletedFlag(FlagRule):
+    """
+    Flag customers whose birthday party just completed (yesterday).
+
+    Business logic:
+    - Customer's email matches a host_email in Firebase parties
+    - Party date was yesterday (1 day ago)
+    - Hasn't been flagged for this party in the last 7 days (prevent duplicates)
+
+    This flag triggers the "Post Birthday Party Journey" follow-up flow in Klaviyo.
+    Uses Firebase Firestore instead of BigQuery.
+    """
+
+    def __init__(self):
+        super().__init__(
+            flag_type="birthday_party_host_completed",
+            description="Customer hosted a birthday party yesterday (post-party follow-up)",
+            priority="high"
+        )
+
+    def evaluate(self, customer_id: str, events: list, today: datetime, email: str = None, phone: str = None) -> Dict[str, Any]:
+        """
+        Check if customer hosted a party yesterday.
+
+        Uses Firebase Firestore to query party data.
+        """
+        if not email:
+            return None  # Can't match without email
+
+        try:
+            from data_pipeline.fetch_firebase_birthday_parties import FirebaseBirthdayPartyFetcher
+
+            # Initialize Firebase fetcher
+            fetcher = FirebaseBirthdayPartyFetcher()
+
+            # Get parties that completed yesterday (1 day back)
+            completed_parties = fetcher.get_recent_completed_parties(days_back=1)
+
+            # Find party for this host
+            host_party = None
+            for party in completed_parties:
+                if party.get('host_email', '').lower() == email.lower():
+                    host_party = party
+                    break
+
+            if not host_party:
+                return None  # No completed party for this host
+
+            # Check if already flagged for this party in last 7 days
+            lookback_start = today - timedelta(days=7)
+            recent_flags = [
+                e for e in events
+                if e['event_type'] == 'flag_set'
+                and isinstance(e.get('event_data'), dict)
+                and e.get('event_data', {}).get('flag_type') == self.flag_type
+                and e.get('event_data', {}).get('doc_id') == host_party.get('doc_id')
+                and e['event_date'] >= lookback_start
+                and e['event_date'] <= today
+            ]
+
+            if recent_flags:
+                return None  # Already flagged for this party
+
+            # All criteria met - flag this customer
+            party_date = host_party.get('party_date')
+            party_date_str = party_date.strftime('%Y-%m-%d') if party_date else ''
+
+            return {
+                'customer_id': customer_id,
+                'flag_type': self.flag_type,
+                'triggered_date': today,
+                'flag_data': {
+                    'doc_id': host_party.get('doc_id', ''),
+                    'source': host_party.get('source', ''),
+                    'child_name': host_party.get('child_name', ''),
+                    'party_date': party_date_str,
+                    'host_name': host_party.get('host_name', ''),
+                    'host_email': host_party.get('host_email', ''),
+                    'description': self.description
+                },
+                'priority': self.priority
+            }
+
+        except Exception as e:
+            print(f"   ⚠️  Error checking Firebase birthday parties for {customer_id}: {e}")
+            return None
+
+
 class FiftyPercentOfferSentFlag(FlagRule):
     """
     Flag customers when they receive an email with a 50% off offer.
@@ -1465,7 +1579,7 @@ class ActiveMembershipFlag(FlagRule):
             if not capitan_id:
                 return None  # No Capitan ID mapping found
 
-        # Check if customer has any active membership
+        # Check if customer has any active membership (excluding prepaid passes)
         customer_memberships = self._memberships_df[
             (self._memberships_df['owner_id'].astype(str) == capitan_id) &
             (self._memberships_df['status'] == 'ACT')
@@ -1474,9 +1588,17 @@ class ActiveMembershipFlag(FlagRule):
         if customer_memberships.empty:
             return None
 
+        # Filter out prepaid passes - they don't count as memberships
+        regular_memberships = customer_memberships[
+            ~customer_memberships['name'].apply(is_prepaid_pass)
+        ]
+
+        if regular_memberships.empty:
+            return None  # Only has prepaid passes, not regular memberships
+
         # Get membership details for context
-        membership_names = customer_memberships['name'].unique().tolist()
-        membership_count = len(customer_memberships)
+        membership_names = regular_memberships['name'].unique().tolist()
+        membership_count = len(regular_memberships)
 
         return {
             'customer_id': customer_id,
@@ -1486,6 +1608,339 @@ class ActiveMembershipFlag(FlagRule):
                 'membership_count': membership_count,
                 'membership_names': membership_names,
                 'capitan_id': capitan_id,
+                'description': self.description
+            },
+            'priority': self.priority
+        }
+
+
+class ActivePrepaidPassFlag(FlagRule):
+    """
+    Flag customers who have an active prepaid pass (2-week pass, etc.).
+
+    This is a PERSISTENT flag - it stays as long as the prepaid pass is active.
+    Prepaid passes are tracked separately from memberships because:
+    - They expire naturally (not "cancelled" or "churned")
+    - They should not affect membership attrition metrics
+    - They represent a different customer journey stage
+
+    Used for:
+    - Shopify tag 'active-prepaid-pass'
+    - Identifying customers in trial period
+    - Conversion tracking (prepaid pass -> membership)
+    """
+
+    def __init__(self):
+        super().__init__(
+            flag_type="active-prepaid-pass",
+            description="Customer has an active prepaid pass (2-week pass, etc.)",
+            priority="low"
+        )
+        self._memberships_df = None
+        self._uuid_to_capitan_id = {}
+        self._data_loaded = False
+
+    def _load_data(self):
+        """Load memberships and customer ID mapping from S3 (cached for the session)."""
+        if self._data_loaded:
+            return
+
+        try:
+            aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+            aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+            if aws_access_key_id and aws_secret_access_key:
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key
+                )
+
+                # Load memberships
+                obj = s3_client.get_object(
+                    Bucket='basin-climbing-data-prod',
+                    Key='capitan/memberships.csv'
+                )
+                self._memberships_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+
+                # Load customer_identifiers to build UUID -> Capitan ID mapping
+                obj_ids = s3_client.get_object(
+                    Bucket='basin-climbing-data-prod',
+                    Key='customers/customer_identifiers.csv'
+                )
+                df_identifiers = pd.read_csv(StringIO(obj_ids['Body'].read().decode('utf-8')))
+
+                for _, row in df_identifiers.iterrows():
+                    uuid_id = str(row['customer_id'])
+                    source_id = str(row.get('source_id', ''))
+                    if source_id.startswith('customer:'):
+                        capitan_id = source_id.replace('customer:', '')
+                        if uuid_id not in self._uuid_to_capitan_id:
+                            self._uuid_to_capitan_id[uuid_id] = capitan_id
+            else:
+                self._memberships_df = pd.DataFrame()
+
+        except Exception as e:
+            print(f"   [ActivePrepaidPassFlag] Error loading data: {e}")
+            self._memberships_df = pd.DataFrame()
+
+        self._data_loaded = True
+
+    def evaluate(self, customer_id: str, events: list, today: datetime, **kwargs) -> Dict[str, Any]:
+        """Check if customer has an active prepaid pass."""
+        self._load_data()
+
+        if self._memberships_df is None or self._memberships_df.empty:
+            return None
+
+        capitan_id = str(customer_id)
+        if '-' in capitan_id:
+            capitan_id = self._uuid_to_capitan_id.get(capitan_id)
+            if not capitan_id:
+                return None
+
+        # Get all active memberships
+        customer_memberships = self._memberships_df[
+            (self._memberships_df['owner_id'].astype(str) == capitan_id) &
+            (self._memberships_df['status'] == 'ACT')
+        ]
+
+        if customer_memberships.empty:
+            return None
+
+        # Filter to only prepaid passes
+        prepaid_passes = customer_memberships[
+            customer_memberships['name'].apply(is_prepaid_pass)
+        ]
+
+        if prepaid_passes.empty:
+            return None
+
+        pass_names = prepaid_passes['name'].unique().tolist()
+
+        return {
+            'customer_id': customer_id,
+            'flag_type': self.flag_type,
+            'triggered_date': today,
+            'flag_data': {
+                'pass_count': len(prepaid_passes),
+                'pass_names': pass_names,
+                'capitan_id': capitan_id,
+                'description': self.description
+            },
+            'priority': self.priority
+        }
+
+
+class HasYouthFlag(FlagRule):
+    """
+    Flag customers who have youth associated with their account.
+
+    This is a PERSISTENT flag - it stays as long as any youth condition is true.
+
+    Criteria (any one qualifies):
+    1. Customer has youth in their membership (family membership with youth)
+    2. Customer is a parent in family_relationships (parent_customer_id)
+    3. Customer has a youth membership themselves
+    4. Customer hosted a birthday party
+    5. Customer attended a birthday party (as parent of attending child)
+
+    Used for:
+    - Shopify tag 'has-youth' for youth-focused marketing
+    - Segmentation in Klaviyo for youth programs, camps, teams
+    """
+
+    # Keywords that indicate youth-related memberships
+    YOUTH_MEMBERSHIP_KEYWORDS = [
+        'youth',
+        'family',
+        'junior',
+        'kid',
+        'child',
+    ]
+
+    # Tags that indicate youth involvement
+    BIRTHDAY_PARTY_TAGS = [
+        'birthday-party-host',
+        'birthday-party-attendee',
+    ]
+
+    def __init__(self):
+        super().__init__(
+            flag_type="has-youth",
+            description="Customer has youth in family/membership",
+            priority="low"
+        )
+        self._memberships_df = None
+        self._family_relationships_df = None
+        self._sync_history_df = None
+        self._uuid_to_capitan_id = {}
+        self._data_loaded = False
+
+    def _load_data(self):
+        """Load memberships, family relationships, sync history, and customer ID mapping from S3."""
+        if self._data_loaded:
+            return
+
+        try:
+            aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+            aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+            if aws_access_key_id and aws_secret_access_key:
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key
+                )
+
+                # Load memberships
+                obj = s3_client.get_object(
+                    Bucket='basin-climbing-data-prod',
+                    Key='capitan/memberships.csv'
+                )
+                self._memberships_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+                print(f"   [HasYouthFlag] Loaded {len(self._memberships_df)} memberships")
+
+                # Load family relationships
+                try:
+                    obj_fam = s3_client.get_object(
+                        Bucket='basin-climbing-data-prod',
+                        Key='customers/family_relationships.csv'
+                    )
+                    self._family_relationships_df = pd.read_csv(StringIO(obj_fam['Body'].read().decode('utf-8')))
+                    print(f"   [HasYouthFlag] Loaded {len(self._family_relationships_df)} family relationships")
+                except s3_client.exceptions.NoSuchKey:
+                    print("   [HasYouthFlag] No family_relationships.csv found")
+                    self._family_relationships_df = pd.DataFrame(columns=['parent_customer_id', 'child_customer_id'])
+
+                # Load Shopify sync history to check for birthday party tags
+                try:
+                    obj_sync = s3_client.get_object(
+                        Bucket='basin-climbing-data-prod',
+                        Key='shopify/sync_history.csv'
+                    )
+                    self._sync_history_df = pd.read_csv(StringIO(obj_sync['Body'].read().decode('utf-8')))
+                    print(f"   [HasYouthFlag] Loaded {len(self._sync_history_df)} sync history records")
+                except s3_client.exceptions.NoSuchKey:
+                    print("   [HasYouthFlag] No sync_history.csv found")
+                    self._sync_history_df = pd.DataFrame(columns=['capitan_customer_id', 'tag_name', 'action'])
+
+                # Load customer_identifiers to build UUID -> Capitan ID mapping
+                obj_ids = s3_client.get_object(
+                    Bucket='basin-climbing-data-prod',
+                    Key='customers/customer_identifiers.csv'
+                )
+                df_identifiers = pd.read_csv(StringIO(obj_ids['Body'].read().decode('utf-8')))
+
+                for _, row in df_identifiers.iterrows():
+                    uuid_id = str(row['customer_id'])
+                    source_id = str(row.get('source_id', ''))
+                    if source_id.startswith('customer:'):
+                        capitan_id = source_id.replace('customer:', '')
+                        if uuid_id not in self._uuid_to_capitan_id:
+                            self._uuid_to_capitan_id[uuid_id] = capitan_id
+
+                print(f"   [HasYouthFlag] Built UUID->Capitan mapping for {len(self._uuid_to_capitan_id)} customers")
+            else:
+                print("   [HasYouthFlag] AWS credentials not found, skipping")
+                self._memberships_df = pd.DataFrame()
+                self._family_relationships_df = pd.DataFrame(columns=['parent_customer_id', 'child_customer_id'])
+                self._sync_history_df = pd.DataFrame(columns=['capitan_customer_id', 'tag_name', 'action'])
+
+        except Exception as e:
+            print(f"   [HasYouthFlag] Error loading data: {e}")
+            self._memberships_df = pd.DataFrame()
+            self._family_relationships_df = pd.DataFrame(columns=['parent_customer_id', 'child_customer_id'])
+            self._sync_history_df = pd.DataFrame(columns=['capitan_customer_id', 'tag_name', 'action'])
+
+        self._data_loaded = True
+
+    def _is_youth_membership(self, membership_name: str) -> bool:
+        """Check if a membership name indicates youth involvement."""
+        if not membership_name:
+            return False
+        name_lower = membership_name.lower()
+        return any(keyword in name_lower for keyword in self.YOUTH_MEMBERSHIP_KEYWORDS)
+
+    def _has_birthday_party_tag(self, capitan_id: str) -> Optional[str]:
+        """Check if customer has a birthday party host or attendee tag."""
+        if self._sync_history_df is None or self._sync_history_df.empty:
+            return None
+
+        # Check sync history for birthday party tags that were added (not removed)
+        customer_syncs = self._sync_history_df[
+            (self._sync_history_df['capitan_customer_id'].astype(str) == capitan_id) &
+            (self._sync_history_df['tag_name'].isin(self.BIRTHDAY_PARTY_TAGS)) &
+            (self._sync_history_df['action'] == 'added')
+        ]
+
+        if not customer_syncs.empty:
+            # Return the most recent birthday party tag
+            return customer_syncs.iloc[-1]['tag_name']
+
+        return None
+
+    def evaluate(self, customer_id: str, events: list, today: datetime, **kwargs) -> Dict[str, Any]:
+        """
+        Check if customer has youth associated with their account.
+
+        Criteria:
+        1. Has active youth/family membership
+        2. Is a parent in family_relationships
+        3. Has birthday party host/attendee tag
+        """
+        self._load_data()
+
+        if self._memberships_df is None or self._memberships_df.empty:
+            return None
+
+        # Get Capitan ID
+        capitan_id = str(customer_id)
+        if '-' in capitan_id:
+            capitan_id = self._uuid_to_capitan_id.get(capitan_id)
+            if not capitan_id:
+                return None
+
+        reasons = []
+
+        # Check 1: Has active youth/family membership
+        customer_memberships = self._memberships_df[
+            (self._memberships_df['owner_id'].astype(str) == capitan_id) &
+            (self._memberships_df['status'] == 'ACT')
+        ]
+
+        youth_memberships = customer_memberships[
+            customer_memberships['name'].apply(self._is_youth_membership)
+        ]
+
+        if not youth_memberships.empty:
+            membership_names = youth_memberships['name'].unique().tolist()
+            reasons.append(f"youth/family membership: {', '.join(membership_names)}")
+
+        # Check 2: Is a parent in family_relationships
+        if not self._family_relationships_df.empty:
+            is_parent = (
+                self._family_relationships_df['parent_customer_id'].astype(str) == capitan_id
+            ).any()
+            if is_parent:
+                reasons.append("parent in family relationships")
+
+        # Check 3: Has birthday party host or attendee tag
+        bday_tag = self._has_birthday_party_tag(capitan_id)
+        if bday_tag:
+            reasons.append(f"birthday party: {bday_tag}")
+
+        # If no reasons found, no flag
+        if not reasons:
+            return None
+
+        return {
+            'customer_id': customer_id,
+            'flag_type': self.flag_type,
+            'triggered_date': today,
+            'flag_data': {
+                'capitan_id': capitan_id,
+                'reasons': reasons,
                 'description': self.description
             },
             'priority': self.priority
@@ -1502,10 +1957,14 @@ ACTIVE_RULES = [
     BirthdayPartyHostOneWeekOutFlag(),     # Host has party in 7 days
     BirthdayPartyAttendeeOneWeekOutFlag(), # Attendee has party in 7 days
     BirthdayPartyHostSixDaysOutFlag(),     # Host notification (6 days before)
+    # Note: BirthdayPartyHostCompletedFlag is handled by sync_birthday_party_hosts_to_klaviyo.py
+    # since party hosts may not have events in our customer database
     FiftyPercentOfferSentFlag(),           # Track 50% offer email sends
     MembershipCancelledWinbackFlag(),      # Win-back for cancelled members
     NewMemberFlag(),                       # New member (after 6+ month gap)
-    ActiveMembershipFlag(),                # PERSISTENT: active-membership status
+    ActiveMembershipFlag(),                # PERSISTENT: active-membership status (excludes prepaid passes)
+    ActivePrepaidPassFlag(),               # PERSISTENT: active-prepaid-pass status (2-week passes, etc.)
+    HasYouthFlag(),                        # PERSISTENT: has-youth (family/youth membership or family relationship)
 ]
 
 

@@ -213,3 +213,4 @@ email_send_log.txt
 
 *.env.bak
 .env.bak
+firebase-credentials.json

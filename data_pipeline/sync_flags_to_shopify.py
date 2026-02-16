@@ -73,8 +73,10 @@ class ShopifyFlagSyncer:
         )
 
         # Rate limiting: Shopify allows 2 calls/second
-        self.min_delay_between_calls = 0.6  # 600ms between calls = ~1.6 calls/sec (safe margin)
+        # Using 0.75s to be safer and avoid 429 errors
+        self.min_delay_between_calls = 0.75  # 750ms between calls = ~1.3 calls/sec (safer margin)
         self.last_api_call_time = 0
+        self.rate_limit_retries = 3  # Number of retries on 429 errors
 
         # Track synced events to log to customer_events.csv
         self.synced_events = []
@@ -95,6 +97,9 @@ class ShopifyFlagSyncer:
             'first_time_day_pass_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer list
             'second_visit_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer list
             '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer list
+            'has_youth': 'XJMJMS',  # Has Youth list
+            # Note: birthday_party_host_completed is handled by sync_birthday_party_hosts_to_klaviyo.py
+            # since party hosts may not have events in our customer database
         }
 
         # Additional tags to add alongside the primary tag (for aliases/variations)
@@ -112,6 +117,10 @@ class ShopifyFlagSyncer:
         # Klaviyo suppression cache (unsubscribes)
         self._klaviyo_email_suppressions = None
         self._klaviyo_sms_suppressions = None
+
+        # Cache for membership members data (for parent lookup)
+        self._members_df = None
+        self._customers_df = None
 
         print("✅ Shopify Flag Syncer initialized")
         print(f"   Store: {self.store_domain}")
@@ -628,6 +637,44 @@ class ShopifyFlagSyncer:
 
         self.last_api_call_time = time.time()
 
+    def _shopify_request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
+        """
+        Make a Shopify API request with retry logic for rate limit errors.
+
+        Args:
+            method: HTTP method ('get', 'post', 'put', 'delete')
+            url: Request URL
+            **kwargs: Additional arguments for requests
+
+        Returns:
+            Response object
+        """
+        for attempt in range(self.rate_limit_retries):
+            self._rate_limit()
+
+            if method == 'get':
+                response = requests.get(url, headers=self.headers, timeout=10, **kwargs)
+            elif method == 'post':
+                response = requests.post(url, headers=self.headers, timeout=10, **kwargs)
+            elif method == 'put':
+                response = requests.put(url, headers=self.headers, timeout=10, **kwargs)
+            elif method == 'delete':
+                response = requests.delete(url, headers=self.headers, timeout=10, **kwargs)
+            else:
+                raise ValueError(f"Unknown method: {method}")
+
+            if response.status_code == 429:
+                # Rate limited - wait longer and retry
+                wait_time = 2 * (attempt + 1)  # 2s, 4s, 6s
+                print(f"   ⏳ Rate limited, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+
+            return response
+
+        # Return last response even if it was 429
+        return response
+
     def load_flags_from_s3(self) -> pd.DataFrame:
         """
         Load customer flags from S3.
@@ -672,6 +719,86 @@ class ShopifyFlagSyncer:
         except Exception as e:
             print(f"⚠️  Error loading customers: {e}")
             return pd.DataFrame()
+
+    def load_members_from_s3(self) -> pd.DataFrame:
+        """
+        Load membership members data from S3.
+
+        This data shows all members on each membership, which allows us to
+        find parent contact info for youth who don't have their own email/phone.
+
+        Returns:
+            DataFrame with membership_id, customer_id, member names
+        """
+        if self._members_df is not None:
+            return self._members_df
+
+        try:
+            obj = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key="capitan/members.csv"
+            )
+            self._members_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            print(f"✅ Loaded {len(self._members_df)} membership members from S3")
+            return self._members_df
+        except Exception as e:
+            print(f"⚠️  Error loading members: {e}")
+            self._members_df = pd.DataFrame()
+            return self._members_df
+
+    def get_parent_contact(self, customer_id: str, customers_df: pd.DataFrame) -> Optional[Dict]:
+        """
+        Find parent contact info for a youth without email/phone.
+
+        Looks up shared memberships to find another member who has contact info.
+
+        Args:
+            customer_id: The customer ID (Capitan numeric ID)
+            customers_df: DataFrame of all customers with email/phone
+
+        Returns:
+            Dict with parent's email, phone, first_name, last_name or None
+        """
+        try:
+            customer_id_int = int(customer_id)
+        except (ValueError, TypeError):
+            # UUID or non-numeric ID - can't look up in members
+            return None
+
+        members_df = self.load_members_from_s3()
+        if members_df.empty:
+            return None
+
+        # Find all memberships this customer is on
+        customer_memberships = members_df[members_df['customer_id'] == customer_id_int]
+        if customer_memberships.empty:
+            return None
+
+        membership_ids = customer_memberships['membership_id'].unique()
+
+        # For each membership, find other members who have email
+        for mid in membership_ids:
+            all_members = members_df[members_df['membership_id'] == mid]
+            member_ids = all_members['customer_id'].unique()
+
+            # Find members with contact info (excluding the original customer)
+            members_with_contact = customers_df[
+                (customers_df['customer_id'].isin(member_ids)) &
+                (customers_df['customer_id'] != customer_id_int) &
+                (customers_df['email'].notna())
+            ]
+
+            if not members_with_contact.empty:
+                parent = members_with_contact.iloc[0]
+                return {
+                    'email': parent['email'],
+                    'phone': parent.get('phone'),
+                    'first_name': parent.get('first_name', ''),
+                    'last_name': parent.get('last_name', ''),
+                    'is_parent_contact': True
+                }
+
+        return None
 
     def load_synced_flags_tracking(self) -> pd.DataFrame:
         """
@@ -1010,8 +1137,7 @@ class ShopifyFlagSyncer:
         if email and pd.notna(email):
             url = f"{self.base_url}/customers/search.json?query=email:{email}"
             try:
-                self._rate_limit()  # Rate limit before API call
-                response = requests.get(url, headers=self.headers, timeout=10)
+                response = self._shopify_request_with_retry('get', url)
                 if response.status_code == 200:
                     customers = response.json().get('customers', [])
                     if len(customers) > 0:
@@ -1027,8 +1153,7 @@ class ShopifyFlagSyncer:
                 phone_normalized = phone_digits[-10:]  # Last 10 digits
                 url = f"{self.base_url}/customers/search.json?query=phone:+1{phone_normalized}"
                 try:
-                    self._rate_limit()  # Rate limit before API call
-                    response = requests.get(url, headers=self.headers, timeout=10)
+                    response = self._shopify_request_with_retry('get', url)
                     if response.status_code == 200:
                         customers = response.json().get('customers', [])
                         if len(customers) > 0:
@@ -1095,13 +1220,22 @@ class ShopifyFlagSyncer:
         payload = {"customer": customer_data}
 
         try:
-            self._rate_limit()  # Rate limit before API call
-            response = requests.post(url, headers=self.headers, json=payload, timeout=10)
+            response = self._shopify_request_with_retry('post', url, json=payload)
             if response.status_code in [200, 201]:
                 customer = response.json().get('customer', {})
                 return str(customer['id'])
+            elif response.status_code == 422:
+                # Customer might already exist with this email
+                error_text = response.text
+                if 'has already been taken' in error_text:
+                    # Try to find existing customer
+                    existing = self.search_shopify_customer(email=email, phone=phone)
+                    if existing:
+                        return existing
+                print(f"   ⚠️  Failed to create customer: {response.status_code} - {error_text[:200]}")
+                return None
             else:
-                print(f"   ⚠️  Failed to create customer: {response.status_code} - {response.text}")
+                print(f"   ⚠️  Failed to create customer: {response.status_code} - {response.text[:200]}")
                 return None
         except Exception as e:
             print(f"   ⚠️  Error creating customer: {e}")
@@ -1203,8 +1337,7 @@ class ShopifyFlagSyncer:
         url = f"{self.base_url}/customers/{shopify_customer_id}.json"
 
         try:
-            self._rate_limit()  # Rate limit before API call
-            response = requests.get(url, headers=self.headers, timeout=10)
+            response = self._shopify_request_with_retry('get', url)
             if response.status_code == 200:
                 customer = response.json().get('customer', {})
                 tags_str = customer.get('tags', '')
@@ -1255,8 +1388,7 @@ class ShopifyFlagSyncer:
         }
 
         try:
-            self._rate_limit()  # Rate limit before API call
-            response = requests.put(url, headers=self.headers, json=payload, timeout=10)
+            response = self._shopify_request_with_retry('put', url, json=payload)
             if response.status_code == 200:
                 # Log to sync history
                 self.log_sync_action(
@@ -1268,7 +1400,7 @@ class ShopifyFlagSyncer:
                 )
                 return True
             else:
-                print(f"   ⚠️  Failed to add tag: {response.status_code} - {response.text}")
+                print(f"   ⚠️  Failed to add tag: {response.status_code} - {response.text[:200]}")
                 return False
         except Exception as e:
             print(f"   ⚠️  Error adding tag: {e}")
@@ -1314,8 +1446,7 @@ class ShopifyFlagSyncer:
         }
 
         try:
-            self._rate_limit()  # Rate limit before API call
-            response = requests.put(url, headers=self.headers, json=payload, timeout=10)
+            response = self._shopify_request_with_retry('put', url, json=payload)
             if response.status_code == 200:
                 # Log to sync history
                 self.log_sync_action(
@@ -1327,7 +1458,7 @@ class ShopifyFlagSyncer:
                 )
                 return True
             else:
-                print(f"   ⚠️  Failed to remove tag: {response.status_code} - {response.text}")
+                print(f"   ⚠️  Failed to remove tag: {response.status_code} - {response.text[:200]}")
                 return False
         except Exception as e:
             print(f"   ⚠️  Error removing tag: {e}")
@@ -1396,6 +1527,7 @@ class ShopifyFlagSyncer:
             not_found = 0
             created = 0
             errors = 0
+            parent_matched = 0
 
             for _, row in flag_subset.iterrows():
                 capitan_id = row['customer_id']
@@ -1404,6 +1536,17 @@ class ShopifyFlagSyncer:
                 first_name = row.get('first_name', 'Unknown')
                 last_name = row.get('last_name', 'Unknown')
                 flagged_at = row.get('flagged_at', '')
+                using_parent_contact = False
+
+                # If customer has no contact info, try to find parent via shared membership
+                if (not email or pd.isna(email)) and (not phone or pd.isna(phone)):
+                    parent_contact = self.get_parent_contact(capitan_id, customers_df)
+                    if parent_contact:
+                        email = parent_contact['email']
+                        parent_matched += 1
+                        phone = parent_contact.get('phone')
+                        using_parent_contact = True
+                        print(f"   👨‍👧 Using parent contact for {capitan_id} ({first_name} {last_name}) -> {parent_contact['first_name']} {parent_contact['last_name']}")
 
                 # Search for customer in Shopify
                 shopify_id = self.search_shopify_customer(email=email, phone=phone)
@@ -1516,6 +1659,7 @@ class ShopifyFlagSyncer:
             print(f"\n   Summary for {flag_name} -> tag '{tag_name}':")
             print(f"      Tagged: {synced}")
             print(f"      Created in Shopify: {created}")
+            print(f"      Matched via parent: {parent_matched}")
             print(f"      Missing contact info: {not_found}")
             print(f"      Errors: {errors}")
 
