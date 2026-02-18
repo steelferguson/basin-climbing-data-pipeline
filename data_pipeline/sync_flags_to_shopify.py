@@ -98,6 +98,7 @@ class ShopifyFlagSyncer:
             'second_visit_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer list
             '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer list
             'has_youth': 'XJMJMS',  # Has Youth list
+            'new_member': 'Y5vi7J',  # New Members list (triggers New Member Journey flow)
             # Note: birthday_party_host_completed is handled by sync_birthday_party_hosts_to_klaviyo.py
             # since party hosts may not have events in our customer database
         }
@@ -781,10 +782,14 @@ class ShopifyFlagSyncer:
             all_members = members_df[members_df['membership_id'] == mid]
             member_ids = all_members['customer_id'].unique()
 
+            # Convert member_ids to strings for comparison (customers_df may have string customer_id)
+            member_ids_str = [str(m) for m in member_ids]
+            customer_id_str = str(customer_id_int)
+
             # Find members with contact info (excluding the original customer)
             members_with_contact = customers_df[
-                (customers_df['customer_id'].isin(member_ids)) &
-                (customers_df['customer_id'] != customer_id_int) &
+                (customers_df['customer_id'].astype(str).isin(member_ids_str)) &
+                (customers_df['customer_id'].astype(str) != customer_id_str) &
                 (customers_df['email'].notna())
             ]
 

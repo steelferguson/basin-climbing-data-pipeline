@@ -274,9 +274,9 @@ class FirstTimeDayPass2WeekOfferFlag(FlagRule):
         day_pass_checkins_sorted = sorted(day_pass_checkins, key=lambda e: e['event_date'])
         most_recent_checkin = day_pass_checkins_sorted[-1]
 
-        # NEW: Criteria 1.5: Most recent checkin must be within last 3 days (recent activity)
-        three_days_ago = today - timedelta(days=3)
-        if most_recent_checkin['event_date'] < three_days_ago:
+        # NEW: Criteria 1.5: Most recent checkin must be within last 5 days (recent activity)
+        five_days_ago = today - timedelta(days=5)
+        if most_recent_checkin['event_date'] < five_days_ago:
             return None  # Not recent enough - this is for daily win-back, not historical
 
         # Criteria 2: Must have had NO day pass checkins in the 2 months BEFORE the most recent one
@@ -408,9 +408,9 @@ class SecondVisitOfferEligibleFlag(FlagRule):
         day_pass_checkins_sorted = sorted(day_pass_checkins, key=lambda e: e['event_date'])
         most_recent_checkin = day_pass_checkins_sorted[-1]
 
-        # NEW: Criteria 1.5: Most recent checkin must be within last 3 days (recent activity)
-        three_days_ago = today - timedelta(days=3)
-        if most_recent_checkin['event_date'] < three_days_ago:
+        # NEW: Criteria 1.5: Most recent checkin must be within last 5 days (recent activity)
+        five_days_ago = today - timedelta(days=5)
+        if most_recent_checkin['event_date'] < five_days_ago:
             return None  # Not recent enough - this is for daily win-back, not historical
 
         # Criteria 2: Must have had NO day pass checkins in the 2 months BEFORE the most recent one

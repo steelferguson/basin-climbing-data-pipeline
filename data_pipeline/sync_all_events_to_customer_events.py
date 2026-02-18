@@ -9,6 +9,7 @@ Event Types:
     - membership_purchase: New membership purchase
     - membership_renewal: Membership renewal
     - membership_started: Membership start date
+    - membership_cancelled: Membership ended with no replacement (attrition)
     - day_pass_purchase: Day pass purchase
     - retail_purchase: Retail item purchase
     - programming_purchase: Class/program purchase
@@ -85,6 +86,9 @@ class CustomerEventsSyncer:
 
         # Account/waiver events
         'account_created': 'Customer account created (waiver signed)',
+
+        # Membership lifecycle events
+        'membership_cancelled': 'Membership ended with no replacement (attrition)',
 
         # Categorized programming events (leads)
         'camp_signup': 'Camp registration (summer, spring break, etc.)',
@@ -766,6 +770,122 @@ class CustomerEventsSyncer:
             self.save_customer_events(events_df)
 
         print(f"   Added {len(new_events)} account created events")
+        return len(new_events)
+
+    def sync_membership_cancelled_events(self, days_back: int = 30) -> int:
+        """
+        Sync membership_cancelled events for members who ended with no replacement.
+
+        Business logic:
+        - Membership status changed to END
+        - Customer does NOT have another active membership
+        - NOT a prepaid pass (2-week passes expire naturally, not "cancelled")
+        - This is TRUE attrition (not a membership switch)
+
+        These events trigger the MembershipCancelledWinbackFlag.
+        """
+        print(f"\nSyncing membership cancelled events (last {days_back} days)...")
+
+        # Prepaid pass keywords - these expire naturally and are not "cancellations"
+        PREPAID_PASS_KEYWORDS = ['2-week', '2 week', 'two week', '2-Week']
+
+        def is_prepaid_pass(membership_name: str) -> bool:
+            if not membership_name:
+                return False
+            name_lower = membership_name.lower()
+            return any(keyword.lower() in name_lower for keyword in PREPAID_PASS_KEYWORDS)
+
+        # Load memberships
+        try:
+            obj = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key="capitan/memberships.csv"
+            )
+            memberships_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+        except Exception as e:
+            print(f"   Error loading memberships: {e}")
+            return 0
+
+        memberships_df['end_date'] = pd.to_datetime(memberships_df['end_date'], errors='coerce')
+
+        # Filter to recently ended memberships (excluding prepaid passes)
+        cutoff = pd.Timestamp.now() - timedelta(days=days_back)
+        ended_memberships = memberships_df[
+            (memberships_df['status'] == 'END') &
+            (memberships_df['end_date'] >= cutoff) &
+            (memberships_df['end_date'].notna()) &
+            (~memberships_df['name'].apply(is_prepaid_pass))  # Exclude prepaid passes
+        ].copy()
+
+        print(f"   Found {len(ended_memberships)} memberships ended in last {days_back} days (excluding prepaid passes)")
+
+        if ended_memberships.empty:
+            return 0
+
+        # Find customers with active memberships (to exclude from cancellation events)
+        active_memberships = memberships_df[memberships_df['status'] == 'ACT']
+        customers_with_active = set(active_memberships['owner_id'].astype(str).unique())
+        print(f"   {len(customers_with_active)} customers still have active memberships")
+
+        # Load existing events to avoid duplicates
+        events_df = self.load_customer_events()
+
+        # Build set of existing membership_cancelled events by membership_id
+        existing_membership_ids = set()
+        mc_events = events_df[events_df['event_type'] == 'membership_cancelled']
+        for _, row in mc_events.iterrows():
+            if pd.notna(row.get('event_data')):
+                try:
+                    data = json.loads(row['event_data'])
+                    if 'membership_id' in data:
+                        existing_membership_ids.add(str(data['membership_id']))
+                except:
+                    pass
+
+        new_events = []
+        skipped_has_active = 0
+        skipped_duplicate = 0
+
+        for _, row in ended_memberships.iterrows():
+            membership_id = str(row['membership_id'])
+            customer_id = str(int(row['owner_id']))
+
+            # Skip if already processed
+            if membership_id in existing_membership_ids:
+                skipped_duplicate += 1
+                continue
+
+            # Skip if customer has another active membership (this is a switch, not attrition)
+            if customer_id in customers_with_active:
+                skipped_has_active += 1
+                continue
+
+            event_data = {
+                'membership_id': int(row['membership_id']),
+                'membership_name': row.get('name', ''),
+                'end_date': row['end_date'].isoformat() if pd.notna(row['end_date']) else None,
+                'start_date': row.get('start_date', ''),
+                'billing_amount': float(row.get('billing_amount', 0)) if pd.notna(row.get('billing_amount')) else 0,
+            }
+
+            new_events.append({
+                'customer_id': customer_id,
+                'event_date': row['end_date'].isoformat(),
+                'event_type': 'membership_cancelled',
+                'event_source': 'capitan',
+                'source_confidence': 'high',
+                'event_details': f"Membership ended: {row.get('name', 'Unknown')}",
+                'event_data': json.dumps(event_data)
+            })
+            existing_membership_ids.add(membership_id)
+
+        if new_events:
+            new_df = pd.DataFrame(new_events)
+            events_df = pd.concat([events_df, new_df], ignore_index=True)
+            self.save_customer_events(events_df)
+
+        print(f"   Added {len(new_events)} membership cancelled events")
+        print(f"   Skipped: {skipped_has_active} (have active membership), {skipped_duplicate} (duplicate)")
         return len(new_events)
 
     def sync_day_pass_from_checkins(self, days_back: int = 30) -> int:
@@ -1487,6 +1607,7 @@ class CustomerEventsSyncer:
         total_added += self.sync_birthday_party_events()
         total_added += self.sync_day_pass_from_checkins(days_back)
         total_added += self.sync_account_created_events(days_back)
+        total_added += self.sync_membership_cancelled_events(days_back)
 
         # Categorize programming purchases into specific lead types
         self.categorize_programming_purchases()
