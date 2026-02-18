@@ -495,9 +495,10 @@ class CustomerEventsSyncer:
 
     def sync_twilio_events(self, days_back: int = 30) -> int:
         """
-        Sync Twilio SMS events to customer_events.
+        Sync Twilio SMS events to customer_events AND update customer sources.
 
         Links SMS to customers by phone number.
+        Note: We don't create new customers from Twilio (phone-only data risks duplicates).
         """
         print(f"\nSyncing Twilio SMS events (last {days_back} days)...")
 
@@ -511,6 +512,10 @@ class CustomerEventsSyncer:
         except self.s3_client.exceptions.NoSuchKey:
             print("   No Twilio messages found")
             return 0
+
+        # Load customers table to update sources
+        customers_df = self.load_customers()
+        customers_modified = False
 
         # Load existing events
         events_df = self.load_customer_events()
@@ -534,7 +539,33 @@ class CustomerEventsSyncer:
         new_events = []
         matched = 0
         unmatched = 0
+        sources_updated = 0
 
+        # First pass: Update customer sources for ALL messages (not just new ones)
+        customers_with_twilio = set()
+        for _, row in recent.iterrows():
+            if row['direction'] == 'outbound-api':
+                phone = row['to_number']
+            else:
+                phone = row['from_number']
+
+            customer_id = self.get_customer_id_from_phone(phone)
+            if customer_id and customer_id not in customers_with_twilio:
+                customers_with_twilio.add(customer_id)
+                cust_idx = customers_df[customers_df['customer_id'].astype(str) == str(customer_id)].index
+                if len(cust_idx) > 0:
+                    idx = cust_idx[0]
+                    current_sources = str(customers_df.at[idx, 'customer_sources']) if pd.notna(customers_df.at[idx, 'customer_sources']) else ''
+                    sources_list = [s.strip() for s in current_sources.split(',') if s.strip()]
+                    if 'twilio' not in sources_list:
+                        sources_list.append('twilio')
+                        customers_df.at[idx, 'customer_sources'] = ','.join(sources_list)
+                        customers_modified = True
+                        sources_updated += 1
+
+        print(f"   Updated twilio source for {sources_updated} customers")
+
+        # Second pass: Create events for new messages only
         for _, row in recent.iterrows():
             # Skip if already processed
             if row['message_sid'] in existing_keys:
@@ -595,26 +626,66 @@ class CustomerEventsSyncer:
             events_df = pd.concat([events_df, new_df], ignore_index=True)
             self.save_customer_events(events_df)
 
+        # Save customers if sources were updated
+        if customers_modified:
+            self.save_customers(customers_df)
+
         print(f"   Added {len(new_events)} SMS events ({matched} matched, {unmatched} unmatched)")
         return len(new_events)
 
     def sync_klaviyo_events(self, days_back: int = 7) -> int:
         """
-        Sync Klaviyo email/SMS received events to customer_events.
+        Sync Klaviyo contacts to customers table AND update sources.
 
-        Uses the Klaviyo API to get recent flow metrics.
+        Creates new customers from Klaviyo emails not in Capitan.
         """
-        print(f"\nSyncing Klaviyo events (last {days_back} days)...")
+        print(f"\nSyncing Klaviyo customers...")
 
-        klaviyo_key = os.getenv("KLAVIYO_PRIVATE_KEY")
-        if not klaviyo_key:
-            print("   No Klaviyo API key configured")
+        # Load Klaviyo message activity to find unique contacts
+        try:
+            obj = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key="klaviyo/message_activity.csv"
+            )
+            messages_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+        except Exception as e:
+            print(f"   Error loading Klaviyo data: {e}")
             return 0
 
-        # This is handled by sync_klaviyo_flow_events.py
-        # We just ensure those events are in customer_events
-        print("   Klaviyo events synced via sync_klaviyo_flow_events.py")
-        return 0
+        # Get unique emails from Klaviyo
+        unique_emails = messages_df[messages_df['email'].notna()]['email'].str.lower().str.strip().unique()
+        print(f"   Found {len(unique_emails)} unique Klaviyo contacts")
+
+        # Load customers table
+        customers_df = self.load_customers()
+        customers_modified = False
+
+        existing_count = 0
+        new_count = 0
+
+        for email in unique_emails:
+            if not email or '@' not in str(email):
+                continue
+
+            original_len = len(customers_df)
+            customers_df, customer_id = self.sync_customer_from_external_source(
+                customers_df,
+                email=email,
+                source='klaviyo'
+            )
+
+            if len(customers_df) > original_len:
+                new_count += 1
+                customers_modified = True
+            elif customer_id:
+                existing_count += 1
+                customers_modified = True
+
+        if customers_modified:
+            self.save_customers(customers_df)
+
+        print(f"   Klaviyo customers: {existing_count} existing updated, {new_count} new created")
+        return new_count
 
     def sync_account_created_events(self, days_back: int = 30) -> int:
         """
