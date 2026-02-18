@@ -209,6 +209,218 @@ class CustomerEventsSyncer:
         mapping = self.load_email_to_customer_mapping()
         return mapping.get(str(email).lower().strip())
 
+    # =========================================================================
+    # UNIFIED CUSTOMERS TABLE MANAGEMENT
+    # =========================================================================
+
+    # Source priority for primary_source (lower = higher priority)
+    SOURCE_PRIORITY = {
+        'capitan_checkin': 0,      # Actually visited the gym
+        'firebase_birthday': 1,    # Birthday party host/attendee
+        'klaviyo': 2,              # Email engagement
+        'twilio': 3,               # SMS engagement
+        'stripe': 4,               # Payment
+        'capitan_waiver': 5,       # Signed waiver only (lowest)
+    }
+
+    def load_customers(self) -> pd.DataFrame:
+        """Load customers table from S3, adding new columns if needed."""
+        try:
+            obj = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key="capitan/customers.csv"
+            )
+            df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+
+            # Add new columns if they don't exist
+            if 'customer_sources' not in df.columns:
+                df['customer_sources'] = 'capitan_waiver'
+            if 'primary_source' not in df.columns:
+                df['primary_source'] = 'capitan_waiver'
+
+            return df
+        except Exception as e:
+            print(f"Error loading customers: {e}")
+            return pd.DataFrame()
+
+    def save_customers(self, df: pd.DataFrame):
+        """Save customers table to S3."""
+        csv_buffer = StringIO()
+        df.to_csv(csv_buffer, index=False)
+        self.s3_client.put_object(
+            Bucket=self.bucket_name,
+            Key="capitan/customers.csv",
+            Body=csv_buffer.getvalue(),
+            ContentType='text/csv'
+        )
+        print(f"Saved {len(df):,} customers to customers.csv")
+
+    def get_next_external_customer_id(self, df: pd.DataFrame, prefix: str) -> str:
+        """Generate next external customer ID with given prefix (e.g., fb-00001)."""
+        # Find existing IDs with this prefix
+        existing_ids = df[df['customer_id'].astype(str).str.startswith(f'{prefix}-')]
+        if len(existing_ids) == 0:
+            return f"{prefix}-00001"
+
+        # Extract numbers and find max
+        max_num = 0
+        for cid in existing_ids['customer_id'].astype(str):
+            try:
+                num = int(cid.split('-')[1])
+                max_num = max(max_num, num)
+            except:
+                pass
+
+        return f"{prefix}-{max_num + 1:05d}"
+
+    def sync_customer_from_external_source(
+        self,
+        customers_df: pd.DataFrame,
+        email: str,
+        source: str,
+        first_name: str = '',
+        last_name: str = '',
+        phone: str = ''
+    ) -> tuple[pd.DataFrame, str]:
+        """
+        Sync a customer from an external source to the customers table.
+
+        Returns (updated_df, customer_id)
+
+        Logic:
+        - If email exists in customers: update sources, return existing customer_id
+        - If email doesn't exist: create new customer with prefix ID
+        """
+        if not email:
+            return customers_df, None
+
+        email = email.lower().strip()
+
+        # Check if email already exists
+        existing = customers_df[customers_df['email'].astype(str).str.lower().str.strip() == email]
+
+        if len(existing) > 0:
+            # Customer exists - update sources
+            idx = existing.index[0]
+            customer_id = str(customers_df.at[idx, 'customer_id'])
+
+            # Update customer_sources (add new source if not present)
+            current_sources = str(customers_df.at[idx, 'customer_sources']) if pd.notna(customers_df.at[idx, 'customer_sources']) else ''
+            sources_list = [s.strip() for s in current_sources.split(',') if s.strip()]
+            if source not in sources_list:
+                sources_list.append(source)
+                customers_df.at[idx, 'customer_sources'] = ','.join(sources_list)
+
+            # Update primary_source if new source has higher priority
+            current_primary = str(customers_df.at[idx, 'primary_source']) if pd.notna(customers_df.at[idx, 'primary_source']) else 'capitan_waiver'
+            current_priority = self.SOURCE_PRIORITY.get(current_primary, 999)
+            new_priority = self.SOURCE_PRIORITY.get(source, 999)
+            if new_priority < current_priority:
+                customers_df.at[idx, 'primary_source'] = source
+
+            return customers_df, customer_id
+        else:
+            # New customer - create with prefix ID
+            prefix_map = {
+                'firebase_birthday': 'fb',
+                'klaviyo': 'klav',
+                'twilio': 'twil',
+                'stripe': 'stripe',
+            }
+            prefix = prefix_map.get(source, 'ext')
+            new_customer_id = self.get_next_external_customer_id(customers_df, prefix)
+
+            new_customer = {
+                'customer_id': new_customer_id,
+                'email': email,
+                'phone': phone if phone else None,
+                'first_name': first_name,
+                'last_name': last_name,
+                'preferred_name': None,
+                'birthday': None,
+                'has_opted_in_to_marketing': False,
+                'has_active_membership': False,
+                'active_waiver_exists': False,
+                'latest_waiver_expiration_date': None,
+                'relations_url': None,
+                'emergency_contacts_url': None,
+                'created_at': datetime.now().isoformat(),
+                'customer_sources': source,
+                'primary_source': source,
+            }
+
+            customers_df = pd.concat([customers_df, pd.DataFrame([new_customer])], ignore_index=True)
+
+            # Update the email mapping cache
+            if self._email_to_customer is not None:
+                self._email_to_customer[email] = new_customer_id
+
+            return customers_df, new_customer_id
+
+    def initialize_customer_sources(self) -> int:
+        """
+        Initialize customer_sources and primary_source for existing Capitan customers.
+
+        Sets primary_source based on whether they have checkins:
+        - With checkins: capitan_checkin (they actually visited)
+        - Without checkins: capitan_waiver (waiver only)
+        """
+        print("\nInitializing customer sources from checkins...")
+
+        customers_df = self.load_customers()
+
+        # Load checkins to find customers who have visited
+        try:
+            obj = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key="capitan/checkins.csv"
+            )
+            checkins_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            customers_with_checkins = set(checkins_df['customer_id'].astype(str).unique())
+            print(f"   Found {len(customers_with_checkins):,} customers with checkins")
+        except Exception as e:
+            print(f"   Error loading checkins: {e}")
+            return 0
+
+        updated = 0
+        for idx, row in customers_df.iterrows():
+            customer_id = str(row['customer_id'])
+            current_sources = str(row.get('customer_sources', '')) if pd.notna(row.get('customer_sources')) else ''
+            current_primary = str(row.get('primary_source', '')) if pd.notna(row.get('primary_source')) else ''
+
+            # Skip external customers (they were already set correctly)
+            if customer_id.startswith(('fb-', 'klav-', 'twil-', 'stripe-', 'ext-')):
+                continue
+
+            sources_list = [s.strip() for s in current_sources.split(',') if s.strip()]
+
+            if customer_id in customers_with_checkins:
+                # Customer has checkins - add capitan_checkin source
+                if 'capitan_checkin' not in sources_list:
+                    sources_list.append('capitan_checkin')
+                if 'capitan_waiver' not in sources_list:
+                    sources_list.append('capitan_waiver')
+
+                # Set primary to checkin if currently waiver or empty
+                if current_primary in ('', 'capitan_waiver', 'nan'):
+                    customers_df.at[idx, 'primary_source'] = 'capitan_checkin'
+                    updated += 1
+            else:
+                # Customer has no checkins - waiver only
+                if 'capitan_waiver' not in sources_list:
+                    sources_list.append('capitan_waiver')
+                if current_primary in ('', 'nan'):
+                    customers_df.at[idx, 'primary_source'] = 'capitan_waiver'
+                    updated += 1
+
+            customers_df.at[idx, 'customer_sources'] = ','.join(sources_list)
+
+        if updated > 0:
+            self.save_customers(customers_df)
+            print(f"   Updated primary_source for {updated:,} customers")
+
+        return updated
+
     def sync_tag_events(self, days_back: int = 30) -> int:
         """
         Sync Shopify tag sync/remove events to customer_events.
@@ -424,7 +636,7 @@ class CustomerEventsSyncer:
             print(f"   Error loading customers: {e}")
             return 0
 
-        customers_df['created_at'] = pd.to_datetime(customers_df['created_at'], utc=True)
+        customers_df['created_at'] = pd.to_datetime(customers_df['created_at'], format='mixed', utc=True)
 
         # Filter to recent
         cutoff = pd.Timestamp(datetime.now(), tz='UTC') - timedelta(days=days_back)
@@ -443,14 +655,23 @@ class CustomerEventsSyncer:
 
         new_events = []
         for _, row in recent.iterrows():
-            customer_id = str(int(row['customer_id']))
+            # Handle both numeric and string customer IDs (e.g., fb-00001)
+            cid = row['customer_id']
+            if isinstance(cid, float) and not pd.isna(cid):
+                customer_id = str(int(cid))
+            else:
+                customer_id = str(cid)
+
+            # Skip external customers (they don't sign waivers via Capitan)
+            if customer_id.startswith(('fb-', 'klav-', 'twil-', 'stripe-', 'ext-')):
+                continue
 
             # Skip if already processed
             if customer_id in existing_customer_ids:
                 continue
 
             event_data = {
-                'customer_id': int(row['customer_id']),
+                'customer_id': customer_id,
                 'email': row.get('email', ''),
                 'first_name': row.get('first_name', ''),
                 'last_name': row.get('last_name', ''),
@@ -563,7 +784,13 @@ class CustomerEventsSyncer:
 
     def sync_birthday_party_events(self) -> int:
         """
-        Sync birthday party events to customer_events.
+        Sync birthday party events to customer_events AND customers table.
+
+        Flow:
+        1. Load customers table
+        2. For each host/attendee, sync to customers (create if new)
+        3. Create events with real customer_ids
+        4. Save customers table
 
         Tracks hosts and attendees as leads:
         - birthday_party_booked: Party created (host is a lead)
@@ -579,6 +806,10 @@ class CustomerEventsSyncer:
             print(f"   Error initializing Firebase: {e}")
             return 0
 
+        # Load customers table (will add/update customers from Firebase)
+        customers_df = self.load_customers()
+        customers_modified = False
+
         # Load existing events
         events_df = self.load_customer_events()
 
@@ -592,10 +823,8 @@ class CustomerEventsSyncer:
                 try:
                     data = json.loads(row['event_data'])
                     if row['event_type'] == 'birthday_party_rsvp':
-                        # For RSVPs, key includes doc_id + rsvp_id + event_type
                         key = f"{data.get('doc_id', '')}_{data.get('rsvp_id', '')}_{row['event_type']}"
                     else:
-                        # For booked/completed, key is doc_id + event_type
                         key = f"{data.get('doc_id', '')}_{row['event_type']}"
                     existing_keys.add(key)
                 except:
@@ -608,29 +837,44 @@ class CustomerEventsSyncer:
         all_parties = fetcher.get_all_parties()
         print(f"   Found {len(all_parties)} total parties in Firebase")
 
-        matched_hosts = 0
-        unmatched_hosts = 0
+        existing_hosts = 0
+        new_hosts = 0
 
         for party in all_parties:
             doc_id = party['doc_id']
             host_email = party.get('host_email', '').lower()
             party_date = party.get('party_date')
 
-            # Skip if no email
             if not host_email:
                 continue
 
-            # Look up customer_id
-            customer_id = self.get_customer_id_from_email(host_email)
+            # Sync host to customers table
+            host_name = party.get('host_name', '')
+            first_name = host_name.split()[0] if host_name else ''
+            last_name = ' '.join(host_name.split()[1:]) if host_name and len(host_name.split()) > 1 else ''
 
-            # For tracking, we use email as identifier if no customer_id
-            identifier = customer_id if customer_id else f"email:{host_email}"
-            if customer_id:
-                matched_hosts += 1
+            original_len = len(customers_df)
+            customers_df, customer_id = self.sync_customer_from_external_source(
+                customers_df,
+                email=host_email,
+                source='firebase_birthday',
+                first_name=first_name,
+                last_name=last_name
+            )
+
+            if len(customers_df) > original_len:
+                new_hosts += 1
+                customers_modified = True
             else:
-                unmatched_hosts += 1
+                existing_hosts += 1
+                # Check if sources were updated
+                if customer_id:
+                    customers_modified = True
 
-            # Create booked event (when party was created)
+            if not customer_id:
+                continue
+
+            # Create booked event
             booked_key = f"{doc_id}_birthday_party_booked"
             if booked_key not in existing_keys:
                 event_data = {
@@ -643,18 +887,14 @@ class CustomerEventsSyncer:
                     'status': party.get('status', '')
                 }
 
-                # Use party_date as event date (or today if future party)
-                if party_date:
-                    event_date = party_date.isoformat()
-                else:
-                    event_date = datetime.now().isoformat()
+                event_date = party_date.isoformat() if party_date else datetime.now().isoformat()
 
                 new_events.append({
-                    'customer_id': identifier,
+                    'customer_id': customer_id,
                     'event_date': event_date,
                     'event_type': 'birthday_party_booked',
                     'event_source': 'firebase_birthday',
-                    'source_confidence': 'high' if customer_id else 'email_only',
+                    'source_confidence': 'high',
                     'event_details': f"Party booked for {party.get('child_name', 'unknown')}",
                     'event_data': json.dumps(event_data)
                 })
@@ -674,28 +914,26 @@ class CustomerEventsSyncer:
                     }
 
                     new_events.append({
-                        'customer_id': identifier,
+                        'customer_id': customer_id,
                         'event_date': party_date.isoformat(),
                         'event_type': 'birthday_party_completed',
                         'event_source': 'firebase_birthday',
-                        'source_confidence': 'high' if customer_id else 'email_only',
+                        'source_confidence': 'high',
                         'event_details': f"Party completed for {party.get('child_name', 'unknown')}",
                         'event_data': json.dumps(event_data)
                     })
                     existing_keys.add(completed_key)
 
-        print(f"   Host matching: {matched_hosts} matched, {unmatched_hosts} email-only")
+        print(f"   Hosts: {existing_hosts} existing, {new_hosts} new customers created")
 
         # Get all attendees (RSVPs)
-        # We need to fetch RSVPs from all parties, not just recent ones
-        matched_attendees = 0
-        unmatched_attendees = 0
+        existing_attendees = 0
+        new_attendees = 0
 
         for party in all_parties:
             party_date = party.get('party_date')
             doc_id = party['doc_id']
 
-            # Fetch RSVPs for this party
             try:
                 if party['source'] == 'parties':
                     rsvps_ref = fetcher.db.collection('parties').document(doc_id).collection('rsvps')
@@ -711,14 +949,30 @@ class CustomerEventsSyncer:
                     if not attendee_email:
                         continue
 
-                    # Look up customer_id
-                    customer_id = self.get_customer_id_from_email(attendee_email)
-                    identifier = customer_id if customer_id else f"email:{attendee_email}"
+                    # Sync attendee to customers table
+                    guest_name = rsvp_data.get('guestName', '')
+                    first_name = guest_name.split()[0] if guest_name else ''
+                    last_name = ' '.join(guest_name.split()[1:]) if guest_name and len(guest_name.split()) > 1 else ''
 
-                    if customer_id:
-                        matched_attendees += 1
+                    original_len = len(customers_df)
+                    customers_df, customer_id = self.sync_customer_from_external_source(
+                        customers_df,
+                        email=attendee_email,
+                        source='firebase_birthday',
+                        first_name=first_name,
+                        last_name=last_name
+                    )
+
+                    if len(customers_df) > original_len:
+                        new_attendees += 1
+                        customers_modified = True
                     else:
-                        unmatched_attendees += 1
+                        existing_attendees += 1
+                        if customer_id:
+                            customers_modified = True
+
+                    if not customer_id:
+                        continue
 
                     # Create RSVP event
                     rsvp_key = f"{doc_id}_{rsvp.id}_birthday_party_rsvp"
@@ -735,28 +989,27 @@ class CustomerEventsSyncer:
                             'party_date': party_date.isoformat() if party_date else None
                         }
 
-                        # Use party date as event date
-                        if party_date:
-                            event_date = party_date.isoformat()
-                        else:
-                            event_date = datetime.now().isoformat()
+                        event_date = party_date.isoformat() if party_date else datetime.now().isoformat()
 
                         new_events.append({
-                            'customer_id': identifier,
+                            'customer_id': customer_id,
                             'event_date': event_date,
                             'event_type': 'birthday_party_rsvp',
                             'event_source': 'firebase_birthday',
-                            'source_confidence': 'high' if customer_id else 'email_only',
+                            'source_confidence': 'high',
                             'event_details': f"RSVP {rsvp_data.get('attending', 'unknown')} to {party.get('child_name', 'unknown')}'s party",
                             'event_data': json.dumps(event_data)
                         })
                         existing_keys.add(rsvp_key)
 
             except Exception as e:
-                # No RSVPs subcollection for this party
                 pass
 
-        print(f"   Attendee matching: {matched_attendees} matched, {unmatched_attendees} email-only")
+        print(f"   Attendees: {existing_attendees} existing, {new_attendees} new customers created")
+
+        # Save customers table if modified
+        if customers_modified:
+            self.save_customers(customers_df)
 
         if new_events:
             new_df = pd.DataFrame(new_events)
@@ -1149,6 +1402,9 @@ class CustomerEventsSyncer:
         print("="*60)
 
         total_added = 0
+
+        # Initialize customer sources (sets primary_source based on checkins)
+        self.initialize_customer_sources()
 
         # Clean up any duplicate birthday events from previous runs
         self.cleanup_duplicate_birthday_events()
