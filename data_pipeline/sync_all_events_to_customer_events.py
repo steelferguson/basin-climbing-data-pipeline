@@ -1607,7 +1607,8 @@ class CustomerEventsSyncer:
         total_added += self.sync_birthday_party_events()
         total_added += self.sync_day_pass_from_checkins(days_back)
         total_added += self.sync_account_created_events(days_back)
-        total_added += self.sync_membership_cancelled_events(days_back)
+        # TODO: Enable when Membership Win-Back flow is configured in Klaviyo
+        # total_added += self.sync_membership_cancelled_events(days_back)
 
         # Categorize programming purchases into specific lead types
         self.categorize_programming_purchases()

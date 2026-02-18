@@ -93,12 +93,12 @@ class ShopifyFlagSyncer:
         # Map flag types to Klaviyo list IDs for flow triggers
         # When a flag is synced to Shopify, also add the member to the Klaviyo list
         self.klaviyo_flag_list_map = {
-            'membership_cancelled_winback': 'VbbZSy',  # Membership Win-Back flow
+            # 'membership_cancelled_winback': 'VbbZSy',  # Membership Win-Back flow - DISABLED: flow not configured yet
             'first_time_day_pass_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer list
             'second_visit_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer list
             '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer list
             'has_youth': 'XJMJMS',  # Has Youth list
-            'new_member': 'Y5vi7J',  # New Members list (triggers New Member Journey flow)
+            # 'new_member': 'Y5vi7J',  # New Members list - DISABLED: flow not configured yet
             # Note: birthday_party_host_completed is handled by sync_birthday_party_hosts_to_klaviyo.py
             # since party hosts may not have events in our customer database
         }
