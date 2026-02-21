@@ -321,11 +321,67 @@ def upload_new_capitan_membership_data(save_local=False):
     capitan_memberships_df = capitan_fetcher.process_membership_data(json_response)
     capitan_members_df = capitan_fetcher.process_member_data(json_response)
 
-    # Filter out 2-week passes from memberships (they are prepaid passes, not memberships)
+    # Extract and save 2-week passes separately with conversion tracking
     if 'is_2_week_pass' in capitan_memberships_df.columns:
-        num_2week = capitan_memberships_df['is_2_week_pass'].sum()
-        capitan_memberships_df = capitan_memberships_df[~capitan_memberships_df['is_2_week_pass']].copy()
-        print(f"Filtered out {num_2week} 2-week passes from memberships data")
+        df_2wk_passes = capitan_memberships_df[capitan_memberships_df['is_2_week_pass']].copy()
+        df_regular_memberships = capitan_memberships_df[~capitan_memberships_df['is_2_week_pass']].copy()
+
+        print(f"Found {len(df_2wk_passes)} 2-week passes")
+
+        # Add conversion tracking: did this 2-week pass owner convert to a regular membership?
+        if not df_2wk_passes.empty and not df_regular_memberships.empty:
+            # Convert dates for comparison
+            df_2wk_passes['start_date'] = pd.to_datetime(df_2wk_passes['start_date'], errors='coerce')
+            df_regular_memberships['start_date'] = pd.to_datetime(df_regular_memberships['start_date'], errors='coerce')
+
+            # For each 2-week pass owner, check if they have a regular membership that started after
+            conversion_info = []
+            for _, row in df_2wk_passes.iterrows():
+                owner_id = row['owner_id']
+                pass_start = row['start_date']
+
+                # Find regular memberships for this owner that started after the 2-week pass
+                owner_regular = df_regular_memberships[
+                    (df_regular_memberships['owner_id'] == owner_id) &
+                    (df_regular_memberships['start_date'] > pass_start)
+                ].sort_values('start_date')
+
+                if not owner_regular.empty:
+                    first_conversion = owner_regular.iloc[0]
+                    conversion_info.append({
+                        'converted_to_membership': True,
+                        'conversion_date': first_conversion['start_date'],
+                        'membership_converted_to': first_conversion['name']
+                    })
+                else:
+                    conversion_info.append({
+                        'converted_to_membership': False,
+                        'conversion_date': None,
+                        'membership_converted_to': None
+                    })
+
+            # Add conversion columns to 2-week passes
+            conversion_df = pd.DataFrame(conversion_info)
+            df_2wk_passes = df_2wk_passes.reset_index(drop=True)
+            df_2wk_passes['converted_to_membership'] = conversion_df['converted_to_membership']
+            df_2wk_passes['conversion_date'] = conversion_df['conversion_date']
+            df_2wk_passes['membership_converted_to'] = conversion_df['membership_converted_to']
+
+            num_converted = df_2wk_passes['converted_to_membership'].sum()
+            print(f"  {num_converted} of {len(df_2wk_passes)} 2-week pass owners converted to regular membership")
+
+        # Upload 2-week passes to S3
+        uploader_2wk = upload_data.DataUploader()
+        uploader_2wk.upload_to_s3(
+            df_2wk_passes,
+            config.aws_bucket_name,
+            config.s3_path_capitan_2_week_passes,
+        )
+        print(f"Uploaded {len(df_2wk_passes)} 2-week passes to S3")
+
+        # Filter out 2-week passes from main memberships data
+        capitan_memberships_df = df_regular_memberships
+        print(f"Filtered out {len(df_2wk_passes)} 2-week passes from memberships data")
 
     if 'is_2_week_pass' in capitan_members_df.columns:
         capitan_members_df = capitan_members_df[~capitan_members_df['is_2_week_pass']].copy()

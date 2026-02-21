@@ -36,6 +36,7 @@ s3_path_capitan_members = "capitan/members.csv"
 s3_path_capitan_membership_revenue_projection = (
     "capitan/membership_revenue_projection.csv"
 )
+s3_path_capitan_2_week_passes = "capitan/2_week_passes.csv"
 s3_path_combined_snapshot = "transactions/snapshots/combined_transaction_data.csv"
 s3_path_capitan_memberships_snapshot = "capitan/snapshots/memberships.csv"
 s3_path_capitan_members_snapshot = "capitan/snapshots/members.csv"
