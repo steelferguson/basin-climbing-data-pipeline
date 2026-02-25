@@ -133,6 +133,9 @@ s3_path_klaviyo_sync_log = "klaviyo/sync_log.csv"  # Tracks what was synced to K
 s3_path_capitan_referrals = "capitan/referrals.csv"
 s3_path_capitan_referral_leaderboard = "capitan/referral_leaderboard.csv"
 
+# Firebase birthday parties
+s3_path_birthday_parties = "firebase/birthday_parties.csv"
+
 snapshot_day_of_month = 1
 s3_path_text_and_metadata = "agent/text_and_metadata"
 

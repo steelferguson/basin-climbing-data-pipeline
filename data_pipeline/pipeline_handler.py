@@ -2277,6 +2277,74 @@ def upload_new_mailchimp_member_tags(save_local=False):
         print("   (Skipping Mailchimp member tags - may be authentication issue or API limit)")
 
 
+def upload_birthday_parties_from_firebase(save_local=False):
+    """
+    Fetch all birthday parties from Firebase and upload to S3.
+
+    This data is used for:
+    - Tracking birthday parties by party date (not booking date)
+    - Post-party follow-up flows
+    - Birthday analytics
+
+    Args:
+        save_local: Whether to save CSV file locally
+    """
+    print(f"\n=== Fetching Birthday Parties from Firebase ===")
+
+    try:
+        from data_pipeline.fetch_firebase_birthday_parties import FirebaseBirthdayPartyFetcher
+
+        fetcher = FirebaseBirthdayPartyFetcher()
+        all_parties = fetcher.get_all_parties()
+
+        if not all_parties:
+            print("No birthday parties found in Firebase")
+            return
+
+        # Convert to DataFrame
+        df_parties = pd.DataFrame(all_parties)
+
+        # Clean up - remove raw_data column and format dates
+        if 'raw_data' in df_parties.columns:
+            df_parties = df_parties.drop(columns=['raw_data'])
+
+        print(f"Fetched {len(df_parties)} birthday parties from Firebase")
+
+        # Show summary
+        if 'party_date' in df_parties.columns:
+            df_parties['party_date'] = pd.to_datetime(df_parties['party_date'], errors='coerce')
+            future_parties = df_parties[df_parties['party_date'] >= pd.Timestamp.now()]
+            past_parties = df_parties[df_parties['party_date'] < pd.Timestamp.now()]
+            print(f"   Past parties: {len(past_parties)}")
+            print(f"   Upcoming parties: {len(future_parties)}")
+
+        # Upload to S3
+        uploader = upload_data.DataUploader()
+        uploader.upload_to_s3(
+            df_parties,
+            config.aws_bucket_name,
+            config.s3_path_birthday_parties,
+        )
+        print(f"✓ Uploaded birthday parties to S3: {config.s3_path_birthday_parties}")
+
+        # Save locally if requested
+        if save_local:
+            local_path = "data/outputs/birthday_parties.csv"
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            df_parties.to_csv(local_path, index=False)
+            print(f"✓ Saved locally: {local_path}")
+
+        print("✓ Birthday parties upload complete!")
+
+    except FileNotFoundError as e:
+        print(f"⚠️  Firebase credentials not found: {e}")
+        print("   Skipping Firebase birthday parties fetch")
+    except Exception as e:
+        print(f"⚠️  Error fetching Firebase birthday parties: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 if __name__ == "__main__":
     # Example: Upload 90 days of ads data
     upload_new_facebook_ads_data(save_local=True, days_back=90)
