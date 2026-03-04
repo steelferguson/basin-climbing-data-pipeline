@@ -7,6 +7,7 @@ except ImportError:
 
 from data_pipeline import fetch_stripe_data
 from data_pipeline import fetch_square_data
+from data_pipeline import fetch_shopify_data
 from data_pipeline import fetch_capitan_membership_data
 from data_pipeline import fetch_instagram_data
 from data_pipeline import fetch_facebook_ads_data
@@ -24,9 +25,93 @@ import pandas as pd
 from data_pipeline import config
 
 
+def transform_shopify_to_transaction_schema(shopify_df, start_date, end_date):
+    """
+    Transform Shopify orders to match the combined transaction schema.
+
+    Shopify sells:
+    - Day passes (various packs)
+    - Birthday party bookings (initial payment/deposit)
+    """
+    if shopify_df is None or len(shopify_df) == 0:
+        return pd.DataFrame()
+
+    # Filter to date range and paid orders only
+    shopify_df = shopify_df.copy()
+    shopify_df['created_at'] = pd.to_datetime(shopify_df['created_at'])
+
+    # Remove timezone for comparison
+    if shopify_df['created_at'].dt.tz is not None:
+        shopify_df['created_at'] = shopify_df['created_at'].dt.tz_localize(None)
+
+    # Filter to date range
+    mask = (shopify_df['created_at'] >= pd.Timestamp(start_date)) & \
+           (shopify_df['created_at'] <= pd.Timestamp(end_date))
+    shopify_df = shopify_df[mask]
+
+    # Only include paid orders
+    shopify_df = shopify_df[shopify_df['financial_status'] == 'paid']
+
+    # Exclude test orders (steel_ferguson emails and very low prices)
+    shopify_df = shopify_df[
+        ~shopify_df['customer_email'].str.contains('steel', case=False, na=False) |
+        (shopify_df['price'] >= 50)
+    ]
+
+    if len(shopify_df) == 0:
+        return pd.DataFrame()
+
+    # Map category to revenue_category
+    def map_revenue_category(row):
+        category = row.get('category', '')
+        product_title = str(row.get('product_title', '')).lower()
+
+        if category == 'Birthday Party' or 'birthday' in product_title or 'party' in product_title:
+            return 'Event Booking'
+        elif category == 'Day Pass' or 'pass' in product_title:
+            return 'Day Pass'
+        else:
+            return 'Other'
+
+    # Map to sub_category_detail for birthday parties
+    def map_sub_category_detail(row):
+        category = row.get('category', '')
+        if category == 'Birthday Party':
+            return 'initial payment'  # Shopify birthday bookings are initial deposits
+        return None
+
+    # Transform to transaction schema
+    transactions = []
+    for _, row in shopify_df.iterrows():
+        # Calculate tax (Texas 8.25%)
+        price = float(row.get('price', 0))
+        pre_tax = price / 1.0825
+        tax = price - pre_tax
+
+        transactions.append({
+            'transaction_id': f"shopify_{row.get('line_item_id', row.get('order_id'))}",
+            'Description': f"Shopify: {row.get('product_title', 'Unknown Product')}",
+            'Pre-Tax Amount': pre_tax,
+            'Tax Amount': tax,
+            'Total Amount': price,
+            'Discount Amount': float(row.get('total_discounts', 0)),
+            'Name': f"{row.get('customer_first_name', '')} {row.get('customer_last_name', '')}".strip() or 'Shopify Customer',
+            'Date': row['created_at'].date(),
+            'revenue_category': map_revenue_category(row),
+            'sub_category': 'birthday' if row.get('category') == 'Birthday Party' else None,
+            'sub_category_detail': map_sub_category_detail(row),
+            'Data Source': 'Shopify',
+            'Day Pass Count': int(row.get('Day Pass Count', 0)) if row.get('category') == 'Day Pass' else 0,
+            'receipt_email': row.get('customer_email'),
+            'billing_email': row.get('customer_email'),
+        })
+
+    return pd.DataFrame(transactions)
+
+
 def fetch_stripe_and_square_and_combine(days=2, end_date=datetime.datetime.now()):
     """
-    Fetches Stripe and Square data for the last X days and combines them into a single DataFrame.
+    Fetches Stripe, Square, and Shopify data for the last X days and combines them into a single DataFrame.
     Uses corrected methods with refund handling (Payment Intents) and strict validation.
 
     Refunds are included as negative transactions to show NET revenue.
@@ -81,7 +166,26 @@ def fetch_stripe_and_square_and_combine(days=2, end_date=datetime.datetime.now()
         start_date, end_date, save_json=False, save_csv=False
     )
 
-    df_combined = pd.concat([stripe_df, square_df], ignore_index=True)
+    # Fetch Shopify data from S3 and transform to transaction schema
+    print(f"Fetching Shopify orders from S3...")
+    try:
+        import boto3
+        from io import StringIO
+        s3 = boto3.client('s3')
+        response = s3.get_object(Bucket=config.aws_bucket_name, Key=config.s3_path_shopify_orders)
+        shopify_raw = pd.read_csv(StringIO(response['Body'].read().decode('utf-8')))
+        shopify_df = transform_shopify_to_transaction_schema(shopify_raw, start_date, end_date)
+        print(f"Added {len(shopify_df)} Shopify transactions")
+    except Exception as e:
+        print(f"Warning: Could not fetch Shopify data: {e}")
+        shopify_df = pd.DataFrame()
+
+    # Combine all sources
+    dfs_to_combine = [stripe_df, square_df]
+    if len(shopify_df) > 0:
+        dfs_to_combine.append(shopify_df)
+
+    df_combined = pd.concat(dfs_to_combine, ignore_index=True)
 
     # Ensure consistent date format as strings in "M/D/YYYY" format
     # Convert to datetime first to handle any timezone issues
