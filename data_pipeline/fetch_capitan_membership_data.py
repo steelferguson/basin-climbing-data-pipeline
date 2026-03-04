@@ -143,9 +143,11 @@ class CapitanDataFetcher:
             frequency = "bi_weekly"
         elif interval == "BWK":
             frequency = "bi_weekly"
-        elif interval == "MON":
+        elif interval == "MON" or interval == "4WK":
             frequency = "monthly"
         elif interval == "YRL" or interval == "YEA":
+            frequency = "annual"
+        elif "annual" in name:
             frequency = "annual"
         elif interval == "3MO":
             frequency = "prepaid_3mo"
