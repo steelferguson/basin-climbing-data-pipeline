@@ -90,12 +90,14 @@ class CapitanDataFetcher:
         interval = membership.get("interval", "").upper()
         name = str(membership.get("name", "")).lower()
         is_founder = "founder" in name
-        is_college = "college" in name
+        # Include both "College Student Monthly" and newer "Student Monthly" memberships
+        is_college = "college" in name or "student" in name
         is_corporate = (
             "corporate" in name or "tfnb" in name or "founders business" in name
         )
         is_mid_day = "mid-day" in name or "mid day" in name
-        is_fitness_only = "fitness only" in name or "fitness-only" in name
+        # Include "Fitness Only", "Fitness-Only", and newer "Fitness Membership"
+        is_fitness_only = "fitness only" in name or "fitness-only" in name or name == "fitness membership"
         has_fitness_addon = "fitness" in name and not is_fitness_only
         is_team_dues = (
             "team dues" in name or "team-dues" in name or
