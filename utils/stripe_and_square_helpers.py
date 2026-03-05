@@ -219,14 +219,15 @@ def calculate_fitness_amount(df):
 
     Fitness revenue includes:
     1. 100% fitness memberships/passes - products where "Fitness" is the primary offering
-    2. Fitness add-ons to climbing memberships (estimate $28/month)
-    3. Fitness classes (HYROX, transformation, strength, yoga, etc.)
+    2. Fitness classes (HYROX, transformation, strength, yoga, etc.)
 
     Detection logic:
     - If product name STARTS with "Fitness" → 100% fitness (e.g., "Fitness Membership")
     - If product has "Fitness Only" or "Fitness-Only" → 100% fitness
-    - If product has "w/ Fitness" or "+ Fitness" → add-on ($28 estimate)
-    - If product is a fitness class → 100% fitness
+    - If product is a fitness class (sub_category='fitness') → 100% fitness
+
+    Note: Combo products (climbing + fitness) are not currently offered.
+    If added in the future, logic will need to be updated to split revenue.
 
     Returns:
         DataFrame with 'fitness_amount' column added
@@ -254,30 +255,6 @@ def calculate_fitness_amount(df):
         df['Description'].str.lower().str.contains('fitness only|fitness-only', na=False, regex=True)
     )
 
-    # Exclude add-ons (products with "w/ Fitness", "+ Fitness", "with Fitness")
-    addon_pattern = r'w/\s*fitness|\+\s*fitness|with\s*fitness'
-    is_addon = df['Description'].str.lower().str.contains(addon_pattern, na=False, regex=True)
-    fitness_full_mask = fitness_full_mask & ~is_addon
-
     df.loc[fitness_full_mask, 'fitness_amount'] = df.loc[fitness_full_mask, 'Total Amount']
-
-    # 3. Fitness add-ons to climbing memberships
-    # These are memberships that include fitness as an addon (e.g., "Solo w/ Fitness")
-    # Common pricing: ~$28/month fitness addon
-    has_fitness_addon_mask = (
-        df['Description'].str.contains('fitness', case=False, na=False) &
-        ~fitness_full_mask &
-        ~fitness_class_mask
-    )
-
-    # For fitness add-ons, estimate based on transaction amount
-    for idx in df[has_fitness_addon_mask].index:
-        total_amount = df.at[idx, 'Total Amount']
-        if total_amount > 60:
-            # Assume $28 fitness addon for regular memberships
-            df.at[idx, 'fitness_amount'] = 28.0
-        elif total_amount > 0:
-            # If smaller amount, maybe it's just the addon - take full amount
-            df.at[idx, 'fitness_amount'] = total_amount
 
     return df
