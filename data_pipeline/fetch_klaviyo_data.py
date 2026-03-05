@@ -154,12 +154,30 @@ class KlaviyoDataFetcher:
         """
         print(f"\nFetching Klaviyo campaigns (last {days_back} days)...")
 
-        # Filter by created date
+        # Filter by created date - API requires channel filter
         cutoff = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%dT00:00:00Z')
 
-        data = self._paginate("campaigns", {
-            "filter": f"greater-or-equal(created_at,{cutoff})"
+        all_data = []
+
+        # Fetch email campaigns
+        print("   Fetching email campaigns...")
+        email_data = self._paginate("campaigns", {
+            "filter": f"and(equals(messages.channel,'email'),greater-or-equal(created_at,{cutoff}))"
         })
+        if email_data:
+            all_data.extend(email_data)
+            print(f"      Found {len(email_data)} email campaigns")
+
+        # Fetch SMS campaigns
+        print("   Fetching SMS campaigns...")
+        sms_data = self._paginate("campaigns", {
+            "filter": f"and(equals(messages.channel,'sms'),greater-or-equal(created_at,{cutoff}))"
+        })
+        if sms_data:
+            all_data.extend(sms_data)
+            print(f"      Found {len(sms_data)} SMS campaigns")
+
+        data = all_data
 
         if not data:
             print("   No campaigns found")
