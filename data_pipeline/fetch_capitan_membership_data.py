@@ -28,14 +28,20 @@ class CapitanDataFetcher:
         df.to_csv("data/outputs/" + file_name + ".csv", index=False)
         print(file_name + " saved in " + "/data/outputs/")
 
-    def get_results_from_api(self, url: str) -> dict:
+    def get_results_from_api(self, url: str, fail_on_partial: bool = True) -> dict:
         """
         Make API request and handle response with pagination.
         Fetches all pages and combines results.
+
+        Args:
+            url: API endpoint path
+            fail_on_partial: If True (default), raises exception on incomplete fetch.
+                           If False, returns partial data with warning.
         """
         all_results = []
         page = 1
         page_size = 100  # API can't handle larger page sizes (502/timeout)
+        expected_total = None  # Track expected total from first page
 
         print(f"Fetching data from {self.base_url}{url}")
 
@@ -46,16 +52,24 @@ class CapitanDataFetcher:
                 response = requests.get(paginated_url, headers=self.headers, timeout=30)
 
                 if response.status_code != 200:
-                    print(f"Failed to retrieve data. Status code: {response.status_code}")
+                    error_msg = f"Failed to retrieve data from {url}. Status code: {response.status_code}, Page: {page}"
+                    print(f"ERROR: {error_msg}")
                     if page == 1:
-                        # First page failed, return None
-                        return None
+                        raise Exception(f"Capitan API error on first page: {error_msg}")
                     else:
-                        # Subsequent page failed, return what we have
-                        break
+                        if fail_on_partial:
+                            raise Exception(f"Capitan API failed mid-pagination: {error_msg}. Got {len(all_results)}/{expected_total or 'unknown'} records.")
+                        else:
+                            print(f"WARNING: Returning partial data ({len(all_results)} records) due to API error")
+                            break
 
                 json_data = response.json()
                 results = json_data.get('results', [])
+
+                # Track expected total from API response
+                if page == 1 and 'count' in json_data:
+                    expected_total = json_data['count']
+                    print(f"  API reports {expected_total} total records")
 
                 if not results:
                     # No more results
@@ -71,11 +85,23 @@ class CapitanDataFetcher:
                 page += 1
 
             except requests.exceptions.RequestException as e:
-                print(f"Error making API request: {e}")
+                error_msg = f"Network error on {url} page {page}: {e}"
+                print(f"ERROR: {error_msg}")
                 if page == 1:
-                    return None
+                    raise Exception(f"Capitan API network error on first page: {error_msg}")
                 else:
-                    break
+                    if fail_on_partial:
+                        raise Exception(f"Capitan API network error mid-pagination: {error_msg}. Got {len(all_results)}/{expected_total or 'unknown'} records.")
+                    else:
+                        print(f"WARNING: Returning partial data ({len(all_results)} records) due to network error")
+                        break
+
+        # Verify we got all expected records
+        if expected_total is not None and len(all_results) != expected_total:
+            warning_msg = f"WARNING: Expected {expected_total} records but got {len(all_results)} from {url}"
+            print(warning_msg)
+            if fail_on_partial and len(all_results) < expected_total:
+                raise Exception(f"Incomplete data fetch: {warning_msg}")
 
         print(f"Successfully fetched {len(all_results)} total records from {url}")
 

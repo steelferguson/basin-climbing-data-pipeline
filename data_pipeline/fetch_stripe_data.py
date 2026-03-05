@@ -175,9 +175,10 @@ class StripeFetcher:
             if charge.get("captured") is False:
                 continue
             transaction_count += 1
+            # Convert from Unix timestamp using UTC to ensure consistent dates
             created_at = datetime.datetime.fromtimestamp(
-                charge["created"]
-            )  # Convert from Unix timestamp
+                charge["created"], tz=datetime.timezone.utc
+            )
             total_money = charge["amount"] / 100  # Stripe amounts are in cents
             pre_tax_money = total_money / (1 + 0.0825)  # ESTAMATED
             tax_money = (
@@ -229,7 +230,8 @@ class StripeFetcher:
             transaction_count += 1
             
             # Get basic payment intent data
-            created_at = datetime.datetime.fromtimestamp(payment_intent["created"])
+            # Convert from Unix timestamp using UTC to ensure consistent dates
+            created_at = datetime.datetime.fromtimestamp(payment_intent["created"], tz=datetime.timezone.utc)
             total_money = payment_intent["amount_received"] / 100  # Use actual received amount, not intended
             currency = payment_intent["currency"]
             description = payment_intent.get("description", "No Description")

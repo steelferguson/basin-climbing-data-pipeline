@@ -242,8 +242,8 @@ def add_new_transactions_to_combined_df(
     print("combining with previous day's df")
     df_combined = pd.concat([df_yesterday, df_today], ignore_index=True)
 
-    print("dropping duplicates")
-    df_combined = df_combined.drop_duplicates(subset=["transaction_id", "Date"])
+    print("dropping duplicates by transaction_id (keeping first occurrence)")
+    df_combined = df_combined.drop_duplicates(subset=["transaction_id"], keep='first')
 
     if save_local:
         df_path = config.df_path_recent_days
@@ -319,8 +319,8 @@ def replace_date_range_in_transaction_df_in_s3(start_date, end_date):
     # Combine: before + new data + after
     df_combined = pd.concat([df_before, df_new, df_after], ignore_index=True)
 
-    print("Dropping duplicates")
-    df_combined = df_combined.drop_duplicates(subset=["transaction_id", "Date"])
+    print("Dropping duplicates by transaction_id (keeping first occurrence)")
+    df_combined = df_combined.drop_duplicates(subset=["transaction_id"], keep='first')
 
     print(f"Final dataset has {len(df_combined)} transactions")
     print("Uploading to s3 at path:", config.s3_path_combined)
@@ -371,8 +371,8 @@ def replace_days_in_transaction_df_in_s3(days=2, end_date=datetime.datetime.now(
     print("combining with previous day's df")
     df_combined = pd.concat([df_yesterday, df_today], ignore_index=True)
 
-    print("dropping duplicates")
-    df_combined = df_combined.drop_duplicates(subset=["transaction_id", "Date"])
+    print("dropping duplicates by transaction_id (keeping first occurrence)")
+    df_combined = df_combined.drop_duplicates(subset=["transaction_id"], keep='first')
 
     print("uploading to s3 at path: ", config.s3_path_combined)
     uploader.upload_to_s3(df_combined, config.aws_bucket_name, config.s3_path_combined)
