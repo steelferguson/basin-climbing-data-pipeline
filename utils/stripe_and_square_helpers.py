@@ -218,8 +218,8 @@ def calculate_fitness_amount(df):
     Calculate the fitness portion of each transaction.
 
     Fitness revenue includes:
-    1. Fitness-only memberships (100% is fitness)
-    2. Fitness add-ons to regular memberships (estimate from description)
+    1. 100% fitness memberships/passes (Fitness Only, Fitness Membership, Fitness Annual, etc.)
+    2. Fitness add-ons to climbing memberships (estimate $28/month)
     3. Fitness classes (HYROX, transformation, strength, yoga, etc.)
 
     Returns:
@@ -232,26 +232,32 @@ def calculate_fitness_amount(df):
     fitness_class_mask = df['sub_category'] == 'fitness'
     df.loc[fitness_class_mask, 'fitness_amount'] = df.loc[fitness_class_mask, 'Total Amount']
 
-    # 2. Fitness-only memberships - full amount is fitness
-    # Check description for "fitness only" or "fitness-only"
-    fitness_only_mask = (
-        df['Description'].str.contains('fitness only', case=False, na=False) |
-        df['Description'].str.contains('fitness-only', case=False, na=False)
+    # 2. 100% fitness memberships/passes - full amount is fitness
+    # These are standalone fitness products (not add-ons to climbing)
+    fitness_full_patterns = [
+        'fitness only',
+        'fitness-only',
+        'fitness membership',      # New "Fitness Membership" type
+        'fitness annual',          # "Fitness Annual Membership"
+        'fitness unlimited',       # "Fitness Unlimited- 3 Month"
+        'fitness kickstart',       # "Fitness Kickstart- 8 week"
+        'fitness 5 pack',          # "Fitness 5 Pack" entry pass
+    ]
+    fitness_full_mask = df['Description'].str.lower().str.contains(
+        '|'.join(fitness_full_patterns), na=False, regex=True
     )
-    df.loc[fitness_only_mask, 'fitness_amount'] = df.loc[fitness_only_mask, 'Total Amount']
+    df.loc[fitness_full_mask, 'fitness_amount'] = df.loc[fitness_full_mask, 'Total Amount']
 
-    # 3. Fitness add-ons - estimate from membership description
-    # Common pricing: $25-30/month fitness addon
-    # If description contains "fitness" but not "fitness only", it's likely an addon
+    # 3. Fitness add-ons to climbing memberships
+    # These are memberships that include fitness as an addon (e.g., "Solo w/ Fitness")
+    # Common pricing: ~$28/month fitness addon
     has_fitness_addon_mask = (
         df['Description'].str.contains('fitness', case=False, na=False) &
-        ~fitness_only_mask &
+        ~fitness_full_mask &
         ~fitness_class_mask
     )
 
     # For fitness add-ons, estimate based on transaction amount
-    # If it's a membership payment with fitness, assume ~$25-30 is the fitness portion
-    # We'll use a simple heuristic: if total amount > $60, assume $28 is fitness addon
     for idx in df[has_fitness_addon_mask].index:
         total_amount = df.at[idx, 'Total Amount']
         if total_amount > 60:
