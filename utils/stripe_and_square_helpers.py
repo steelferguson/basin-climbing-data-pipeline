@@ -218,9 +218,15 @@ def calculate_fitness_amount(df):
     Calculate the fitness portion of each transaction.
 
     Fitness revenue includes:
-    1. 100% fitness memberships/passes (Fitness Only, Fitness Membership, Fitness Annual, etc.)
+    1. 100% fitness memberships/passes - products where "Fitness" is the primary offering
     2. Fitness add-ons to climbing memberships (estimate $28/month)
     3. Fitness classes (HYROX, transformation, strength, yoga, etc.)
+
+    Detection logic:
+    - If product name STARTS with "Fitness" → 100% fitness (e.g., "Fitness Membership")
+    - If product has "Fitness Only" or "Fitness-Only" → 100% fitness
+    - If product has "w/ Fitness" or "+ Fitness" → add-on ($28 estimate)
+    - If product is a fitness class → 100% fitness
 
     Returns:
         DataFrame with 'fitness_amount' column added
@@ -233,19 +239,26 @@ def calculate_fitness_amount(df):
     df.loc[fitness_class_mask, 'fitness_amount'] = df.loc[fitness_class_mask, 'Total Amount']
 
     # 2. 100% fitness memberships/passes - full amount is fitness
-    # These are standalone fitness products (not add-ons to climbing)
-    fitness_full_patterns = [
-        'fitness only',
-        'fitness-only',
-        'fitness membership',      # New "Fitness Membership" type
-        'fitness annual',          # "Fitness Annual Membership"
-        'fitness unlimited',       # "Fitness Unlimited- 3 Month"
-        'fitness kickstart',       # "Fitness Kickstart- 8 week"
-        'fitness 5 pack',          # "Fitness 5 Pack" entry pass
-    ]
-    fitness_full_mask = df['Description'].str.lower().str.contains(
-        '|'.join(fitness_full_patterns), na=False, regex=True
+    # Strategy: If the product name STARTS with "Fitness", it's a fitness product
+    # This catches: "Fitness Membership", "Fitness Annual", "Fitness 5 Pack", etc.
+    # Also catch "Fitness Only" and "Fitness-Only" anywhere in name
+
+    # Extract product name from description (after the colon)
+    # e.g., "Capitan membership #123 renewal payment: Fitness Membership" → "Fitness Membership"
+    product_names = df['Description'].str.extract(r':\s*(.+)$')[0].fillna(df['Description'])
+
+    fitness_full_mask = (
+        # Product name starts with "Fitness" (case insensitive)
+        product_names.str.lower().str.startswith('fitness') |
+        # Or contains "fitness only" / "fitness-only" anywhere
+        df['Description'].str.lower().str.contains('fitness only|fitness-only', na=False, regex=True)
     )
+
+    # Exclude add-ons (products with "w/ Fitness", "+ Fitness", "with Fitness")
+    addon_pattern = r'w/\s*fitness|\+\s*fitness|with\s*fitness'
+    is_addon = df['Description'].str.lower().str.contains(addon_pattern, na=False, regex=True)
+    fitness_full_mask = fitness_full_mask & ~is_addon
+
     df.loc[fitness_full_mask, 'fitness_amount'] = df.loc[fitness_full_mask, 'Total Amount']
 
     # 3. Fitness add-ons to climbing memberships
