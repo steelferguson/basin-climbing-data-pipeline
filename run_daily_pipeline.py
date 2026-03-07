@@ -362,6 +362,17 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error sending birthday reminders: {e}\n")
 
+    # 15b. Sync completed party attendees to Klaviyo (triggers follow-up journey)
+    print("17b. Syncing completed party attendees to Klaviyo...")
+    print("     - Adds to 'Post Birthday Party - Attendees' list")
+    print("     - Triggers follow-up email journey")
+    try:
+        from data_pipeline.sync_birthday_party_attendees_to_klaviyo import sync_completed_party_attendees
+        results = sync_completed_party_attendees(days_back=2, dry_run=False)
+        print(f"✅ Synced {results.get('synced', 0)} party attendees to Klaviyo\n")
+    except Exception as e:
+        print(f"❌ Error syncing party attendees: {e}\n")
+
     # 17. Sync customer data TO Klaviyo
     print("19. Syncing customer profiles to Klaviyo...")
     print("    (Pushes all customers with flags and membership data)")
