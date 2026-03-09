@@ -245,15 +245,12 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error building flag-email verification report: {e}\n")
 
-    # 9e. Send Mailchimp import CSV for 2-week pass journey
-    print("11e. Sending Mailchimp import CSV for 2-week pass journey...")
-    print("    (Emails CSV to vicky@basinclimbing.com for daily import)")
-    try:
-        from data_pipeline.send_mailchimp_import_csv import run_mailchimp_csv_email
-        run_mailchimp_csv_email()
-        print("✅ Mailchimp import CSV sent successfully\n")
-    except Exception as e:
-        print(f"❌ Error sending Mailchimp import CSV: {e}\n")
+    # 9e. DISABLED - Mailchimp import CSV (now using automated Klaviyo sync via flag_sync.yml)
+    # print("11e. Sending Mailchimp import CSV for 2-week pass journey...")
+    # The Klaviyo day pass journey is now automated via sync_flags_to_shopify.py
+    # which adds customers to Klaviyo lists when flags are generated.
+    # See: .github/workflows/flag_sync.yml
+    print("11e. Skipping Mailchimp CSV (using automated Klaviyo sync)\n")
 
     # 10. Generate team membership reconciliation report
     print("12. Generating team membership reconciliation report...")
@@ -372,6 +369,17 @@ def run_daily_pipeline():
         print(f"✅ Synced {results.get('synced', 0)} party attendees to Klaviyo\n")
     except Exception as e:
         print(f"❌ Error syncing party attendees: {e}\n")
+
+    # 15c. Sync completed party hosts to Klaviyo (triggers follow-up journey)
+    print("17c. Syncing completed party hosts to Klaviyo...")
+    print("     - Adds to 'Post Birthday Party - Hosts' list")
+    print("     - Triggers follow-up email journey")
+    try:
+        from data_pipeline.sync_birthday_party_hosts_to_klaviyo import sync_completed_party_hosts
+        results = sync_completed_party_hosts(days_back=2, dry_run=False)
+        print(f"✅ Synced {results.get('synced', 0)} party hosts to Klaviyo\n")
+    except Exception as e:
+        print(f"❌ Error syncing party hosts: {e}\n")
 
     # 17. Sync customer data TO Klaviyo
     print("19. Syncing customer profiles to Klaviyo...")

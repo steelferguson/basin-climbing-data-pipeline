@@ -928,6 +928,17 @@ def update_customer_master(save_local=False):
         csv_content = uploader.download_from_s3(config.aws_bucket_name, 'capitan/memberships.csv')
         df_memberships = uploader.convert_csv_to_df(csv_content)
         print(f"📥 Loaded {len(df_memberships)} memberships for transaction matching")
+
+        # Also load 2-week passes and combine with memberships
+        try:
+            csv_content_2wk = uploader.download_from_s3(config.aws_bucket_name, 'capitan/2_week_passes.csv')
+            df_2week_passes = uploader.convert_csv_to_df(csv_content_2wk)
+            if not df_2week_passes.empty:
+                # Combine 2-week passes with regular memberships for event building
+                df_memberships = pd.concat([df_memberships, df_2week_passes], ignore_index=True)
+                print(f"📥 Added {len(df_2week_passes)} 2-week passes (total: {len(df_memberships)})")
+        except Exception as e:
+            print(f"⚠️  Could not load 2-week passes: {e}")
     except Exception as e:
         print(f"⚠️  Could not load memberships: {e}")
 
