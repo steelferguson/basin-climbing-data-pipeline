@@ -209,11 +209,17 @@ class CustomerEventsBuilder:
         print(f"   - {matched_by_email} matched by email")
         print(f"   - {unmatched} unmatched")
 
-    def add_checkin_events(self, df_checkins: pd.DataFrame):
+    def add_checkin_events(self, df_checkins: pd.DataFrame, active_member_ids: set = None):
         """
         Add check-in events from Capitan.
 
-        Event type: checkin
+        Event types:
+        - checkin: All check-ins
+        - day_pass_purchase: Day pass check-ins (entry_method='ENT' or 'GUE', not active member)
+
+        This creates day_pass_purchase events from checkins because Square POS transactions
+        don't have email linkage, so we can't match day pass purchases to customers.
+        Using checkins ensures all day pass customers get into the journey.
         """
         print(f"\n🚪 Processing check-in events ({len(df_checkins)} records)...")
 
@@ -221,10 +227,15 @@ class CustomerEventsBuilder:
             print("⚠️  No check-in data")
             return
 
+        if active_member_ids is None:
+            active_member_ids = set()
+
         # Check-ins have customer_id directly from Capitan
         # Need to map Capitan customer_id to our unified customer_id
 
         events_added = 0
+        day_pass_events_added = 0
+
         for _, row in df_checkins.iterrows():
             capitan_customer_id = row.get('customer_id')
             # Use checkin_datetime which is the local time of the check-in
@@ -249,6 +260,7 @@ class CustomerEventsBuilder:
             customer_id = customer_match.iloc[0]['customer_id']
             confidence = customer_match.iloc[0]['match_confidence']
 
+            # Add checkin event
             self.events.append({
                 'customer_id': customer_id,
                 'event_date': checkin_date,
@@ -262,7 +274,29 @@ class CustomerEventsBuilder:
             })
             events_added += 1
 
+            # Also create day_pass_purchase event for non-member day pass checkins
+            # entry_method: ENT = day pass entry, GUE = guest entry
+            entry_method = row.get('entry_method', '')
+            is_day_pass_entry = entry_method in ('ENT', 'GUE')
+            is_active_member = str(capitan_customer_id) in active_member_ids
+
+            if is_day_pass_entry and not is_active_member:
+                self.events.append({
+                    'customer_id': customer_id,
+                    'event_date': checkin_date,
+                    'event_type': 'day_pass_purchase',
+                    'event_source': 'capitan',
+                    'source_confidence': confidence,
+                    'event_details': json.dumps({
+                        'checkin_id': row.get('checkin_id'),
+                        'entry_method': entry_method,
+                        'source': 'checkin_derived'  # Indicates this came from checkin, not transaction
+                    })
+                })
+                day_pass_events_added += 1
+
         print(f"✅ Added {events_added} check-in events")
+        print(f"✅ Added {day_pass_events_added} day_pass_purchase events (from non-member checkins)")
 
     def add_membership_events(self, df_memberships: pd.DataFrame):
         """
@@ -693,12 +727,20 @@ def build_customer_events(
 
     builder = CustomerEventsBuilder(customers_master, customer_identifiers, df_memberships)
 
+    # Build active member IDs set for day pass detection
+    active_member_ids = set()
+    if df_memberships is not None and not df_memberships.empty:
+        # Get owner_ids of active memberships (status = 'ACT')
+        active_memberships = df_memberships[df_memberships['status'] == 'ACT']
+        active_member_ids = set(active_memberships['owner_id'].astype(str).unique())
+        print(f"📋 Active members for day pass detection: {len(active_member_ids)}")
+
     # Add events from each source
     if df_transactions is not None and not df_transactions.empty:
         builder.add_transaction_events(df_transactions)
 
     if df_checkins is not None and not df_checkins.empty:
-        builder.add_checkin_events(df_checkins)
+        builder.add_checkin_events(df_checkins, active_member_ids)
 
     if df_memberships is not None and not df_memberships.empty:
         builder.add_membership_events(df_memberships)

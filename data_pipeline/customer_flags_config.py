@@ -308,6 +308,17 @@ class FirstTimeDayPass2WeekOfferFlag(FlagRule):
         if is_active_member:
             return None
 
+        # Criteria 3.5: Must NOT have a 2-week pass (they should be in 2-week journey instead)
+        # 2-week pass trumps day pass journey
+        two_week_pass_events = [
+            e for e in events
+            if e['event_type'] == 'membership_started'
+            and isinstance(e.get('event_data'), dict)
+            and '2-week' in str(e.get('event_data', {}).get('membership_name', '')).lower()
+        ]
+        if two_week_pass_events:
+            return None  # Customer has 2-week pass, should be in that journey instead
+
         # Criteria 4: Must not have been flagged in last 180 days
         lookback_start = today - timedelta(days=180)
         recent_flags = [
@@ -441,6 +452,17 @@ class SecondVisitOfferEligibleFlag(FlagRule):
 
         if is_active_member:
             return None
+
+        # Criteria 3.5: Must NOT have a 2-week pass (they should be in 2-week journey instead)
+        # 2-week pass trumps day pass journey
+        two_week_pass_events = [
+            e for e in events
+            if e['event_type'] == 'membership_started'
+            and isinstance(e.get('event_data'), dict)
+            and '2-week' in str(e.get('event_data', {}).get('membership_name', '')).lower()
+        ]
+        if two_week_pass_events:
+            return None  # Customer has 2-week pass, should be in that journey instead
 
         # Criteria 4: Must not have been flagged in last 180 days
         lookback_start = today - timedelta(days=180)
