@@ -69,10 +69,12 @@ class DataUploader:
     def download_from_s3(self, bucket_name: str, s3_file_path: str) -> str:
         try:
             response = self.s3.get_object(Bucket=bucket_name, Key=s3_file_path)
-            if isinstance(response["Body"], bytes):
-                response_string = response["Body"].read().decode("utf-8")
+            body_content = response["Body"].read()
+            # Always decode to string (Body.read() returns bytes)
+            if isinstance(body_content, bytes):
+                response_string = body_content.decode("utf-8")
             else:
-                response_string = response["Body"].read()
+                response_string = body_content
             return response_string
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')

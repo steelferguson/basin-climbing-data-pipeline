@@ -30,6 +30,7 @@ class CustomerFlagsEngine:
         self.customer_emails = {}  # Cache for customer emails
         self.customer_phones = {}  # Cache for customer phones
         self.is_using_parent_contact = {}  # Track which customers are using parent contact
+        self.child_to_parent = {}  # Map child_customer_id -> parent_customer_id (for flag propagation)
 
     def load_customer_contact_info(self):
         """
@@ -120,7 +121,9 @@ class CustomerFlagsEngine:
             initial_with_phone = sum(1 for p in self.customer_phones.values() if pd.notna(p) and p != '')
 
             # Enrich with parent contact info for customers without their own
+            # Also build child->parent mapping for flag propagation
             parent_contact_added = 0
+            self.child_to_parent = {}
             if not df_family.empty:
                 # Convert family relationship IDs to string to match dictionary keys
                 df_family['child_customer_id'] = df_family['child_customer_id'].astype(str)
@@ -129,6 +132,11 @@ class CustomerFlagsEngine:
                 for _, row in df_family.iterrows():
                     child_id = row['child_customer_id']
                     parent_id = row['parent_customer_id']
+
+                    # Store child->parent mapping for flag propagation
+                    # (keep first parent if multiple - they'll get same email anyway)
+                    if child_id not in self.child_to_parent:
+                        self.child_to_parent[child_id] = parent_id
 
                     # Check if child lacks contact info
                     child_email = self.customer_emails.get(child_id)
@@ -309,6 +317,33 @@ class CustomerFlagsEngine:
                             entry_date=flag['triggered_date'],
                             save_local=True
                         )
+
+        # Propagate child flags to parents
+        # When a child triggers a flag, also flag the parent so they can be contacted
+        parent_flags = []
+        for flag in all_flags:
+            child_id = str(flag['customer_id'])
+            parent_id = self.child_to_parent.get(child_id)
+
+            if parent_id:
+                # Create a parent flag with "_parent" suffix
+                # This enables "Your child..." messaging to parents
+                flag_data = flag['flag_data'].copy() if isinstance(flag['flag_data'], dict) else json.loads(flag['flag_data'])
+                flag_data['child_customer_id'] = child_id
+                flag_data['is_parent_of_flagged_child'] = True
+
+                parent_flag = {
+                    'customer_id': parent_id,
+                    'flag_type': f"{flag['flag_type']}_parent",
+                    'triggered_date': flag['triggered_date'],
+                    'flag_data': flag_data,
+                    'priority': flag['priority']
+                }
+                parent_flags.append(parent_flag)
+
+        if parent_flags:
+            print(f"   📧 Propagating {len(parent_flags)} flags to parents")
+            all_flags.extend(parent_flags)
 
         # Build DataFrame
         if not all_flags:

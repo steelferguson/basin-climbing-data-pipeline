@@ -1500,6 +1500,7 @@ class ActiveMembershipFlag(FlagRule):
             priority="low"  # Low priority since it's a status flag, not an action flag
         )
         self._memberships_df = None
+        self._members_df = None  # All members on memberships (for family/duo linking)
         self._uuid_to_capitan_id = {}  # Map UUID customer_id -> Capitan numeric ID
         self._data_loaded = False
 
@@ -1527,6 +1528,15 @@ class ActiveMembershipFlag(FlagRule):
                 self._memberships_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
                 active_count = len(self._memberships_df[self._memberships_df['status'] == 'ACT'])
                 print(f"   [ActiveMembershipFlag] Loaded {len(self._memberships_df)} memberships ({active_count} active)")
+
+                # Load members (all individuals on memberships - for family/duo linking)
+                obj_members = s3_client.get_object(
+                    Bucket='basin-climbing-data-prod',
+                    Key='capitan/members.csv'
+                )
+                self._members_df = pd.read_csv(StringIO(obj_members['Body'].read().decode('utf-8')))
+                active_members = len(self._members_df[self._members_df['status'] == 'ACT'])
+                print(f"   [ActiveMembershipFlag] Loaded {len(self._members_df)} members ({active_members} active)")
 
                 # Load customer_identifiers to build UUID -> Capitan ID mapping
                 obj_ids = s3_client.get_object(
@@ -1561,7 +1571,10 @@ class ActiveMembershipFlag(FlagRule):
         """
         Check if customer has an active membership.
 
-        Uses the memberships table directly (not events) for accuracy.
+        Uses BOTH the memberships table (for owners) AND members table (for all members
+        on family/duo memberships). This ensures all family members get flagged, not just
+        the membership owner.
+
         Handles both UUID customer_ids (from customer_events) and Capitan numeric IDs.
         """
         self._load_data()
@@ -1579,35 +1592,54 @@ class ActiveMembershipFlag(FlagRule):
             if not capitan_id:
                 return None  # No Capitan ID mapping found
 
-        # Check if customer has any active membership (excluding prepaid passes)
-        customer_memberships = self._memberships_df[
+        membership_names = []
+        is_owner = False
+        is_member = False
+
+        # Check 1: Is customer the OWNER of any active membership?
+        owner_memberships = self._memberships_df[
             (self._memberships_df['owner_id'].astype(str) == capitan_id) &
             (self._memberships_df['status'] == 'ACT')
         ]
-
-        if customer_memberships.empty:
-            return None
-
-        # Filter out prepaid passes - they don't count as memberships
-        regular_memberships = customer_memberships[
-            ~customer_memberships['name'].apply(is_prepaid_pass)
+        # Filter out prepaid passes
+        owner_memberships = owner_memberships[
+            ~owner_memberships['name'].apply(is_prepaid_pass)
         ]
+        if not owner_memberships.empty:
+            is_owner = True
+            membership_names.extend(owner_memberships['name'].unique().tolist())
 
-        if regular_memberships.empty:
-            return None  # Only has prepaid passes, not regular memberships
+        # Check 2: Is customer a MEMBER on any active membership? (family/duo linking)
+        if self._members_df is not None and not self._members_df.empty:
+            member_records = self._members_df[
+                (self._members_df['customer_id'].astype(str) == capitan_id) &
+                (self._members_df['status'] == 'ACT')
+            ]
+            # Filter out prepaid passes
+            member_records = member_records[
+                ~member_records['name'].apply(is_prepaid_pass)
+            ]
+            if not member_records.empty:
+                is_member = True
+                # Add any membership names not already captured from ownership
+                for name in member_records['name'].unique():
+                    if name not in membership_names:
+                        membership_names.append(name)
 
-        # Get membership details for context
-        membership_names = regular_memberships['name'].unique().tolist()
-        membership_count = len(regular_memberships)
+        # Must be either owner or member of at least one active (non-prepaid) membership
+        if not is_owner and not is_member:
+            return None
 
         return {
             'customer_id': customer_id,
             'flag_type': self.flag_type,
             'triggered_date': today,
             'flag_data': {
-                'membership_count': membership_count,
+                'membership_count': len(membership_names),
                 'membership_names': membership_names,
                 'capitan_id': capitan_id,
+                'is_owner': is_owner,
+                'is_member_via_family': is_member and not is_owner,
                 'description': self.description
             },
             'priority': self.priority
