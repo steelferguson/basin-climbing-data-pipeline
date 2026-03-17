@@ -161,6 +161,9 @@ revenue_category_keywords = {
     "comp": "Programming",
     "class": "Programming",
     "camp": "Programming",
+    "homeschool": "Programming",  # Homeschool Climb Club
+    "climb club": "Programming",  # Climb clubs
+    "basin strong": "Programming",  # Basin Strong program
     "event": "Event Booking",
     "birthday": "Event Booking",
     "retreat": "Event Booking",
