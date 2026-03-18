@@ -34,8 +34,13 @@ def log_experiment_entry(
     if entry_date is None:
         entry_date = datetime.now().date()
 
-    # Get last digit of customer_id
-    customer_id_last_digit = int(str(customer_id)[-1])
+    # Get last digit of customer_id (handle both numeric and UUID formats)
+    last_char = str(customer_id)[-1]
+    try:
+        customer_id_last_digit = int(last_char)
+    except ValueError:
+        # UUID ends in hex letter (a-f), convert to 0-5
+        customer_id_last_digit = ord(last_char.lower()) - ord('a')
 
     # Create new entry
     new_entry = {
