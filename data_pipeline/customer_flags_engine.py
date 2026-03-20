@@ -223,14 +223,26 @@ class CustomerFlagsEngine:
                     flag = rule.evaluate(customer_id, events_sorted, today)
 
             if flag:
-                # If customer is using parent contact, add "_child" suffix to flag_type
-                # This enables campaigns to target parents with "Your child..." messaging
-                if self.is_using_parent_contact.get(customer_id, False):
-                    flag['flag_type'] = f"{flag['flag_type']}_child"
-                    # Also add to flag_data for context
+                # If this customer is a child (has parent in family graph) and
+                # the flag supports _child variants, add "_child" suffix.
+                # This enables campaigns to target parents with "Your child..." messaging.
+                is_child = customer_id in self.child_to_parent
+                base_flag_type = flag['flag_type']
+
+                if is_child and customer_flags_config.is_child_eligible_flag(base_flag_type):
+                    flag['flag_type'] = f"{base_flag_type}_child"
                     if 'flag_data' not in flag:
                         flag['flag_data'] = {}
-                    flag['flag_data']['is_using_parent_contact'] = True
+                    flag['flag_data']['is_child_flag'] = True
+                    flag['flag_data']['base_flag_type'] = base_flag_type
+                    flag['flag_data']['parent_customer_id'] = self.child_to_parent[customer_id]
+                    flag['flag_data']['is_using_parent_contact'] = self.is_using_parent_contact.get(customer_id, False)
+                    # Add descriptive metadata for the tag
+                    flag['flag_data']['flag_description'] = customer_flags_config.get_flag_description(base_flag_type, is_child=True)
+                else:
+                    if 'flag_data' not in flag:
+                        flag['flag_data'] = {}
+                    flag['flag_data']['flag_description'] = customer_flags_config.get_flag_description(base_flag_type)
 
                 flags.append(flag)
 
@@ -318,32 +330,36 @@ class CustomerFlagsEngine:
                             save_local=True
                         )
 
-        # Propagate child flags to parents
-        # When a child triggers a flag, also flag the parent so they can be contacted
-        parent_flags = []
+        # Deduplicate child flags against parent flags
+        # When both parent and child trigger the same base flag, suppress the
+        # child's _child version — the parent already gets their own email.
+        # Build set of (parent_id, base_flag_type) from parent's own flags
+        parent_own_flags = set()
         for flag in all_flags:
-            child_id = str(flag['customer_id'])
-            parent_id = self.child_to_parent.get(child_id)
+            cid = str(flag['customer_id'])
+            # If this customer is NOT a child (i.e., is a parent/adult), track their flags
+            if cid not in self.child_to_parent:
+                parent_own_flags.add((cid, flag['flag_type']))
 
-            if parent_id:
-                # Create a parent flag with "_parent" suffix
-                # This enables "Your child..." messaging to parents
-                flag_data = flag['flag_data'].copy() if isinstance(flag['flag_data'], dict) else json.loads(flag['flag_data'])
-                flag_data['child_customer_id'] = child_id
-                flag_data['is_parent_of_flagged_child'] = True
+        # Filter out _child flags where the parent already triggered the base flag
+        child_flags_suppressed = 0
+        filtered_flags = []
+        for flag in all_flags:
+            flag_data = flag['flag_data'] if isinstance(flag['flag_data'], dict) else json.loads(flag['flag_data'])
+            base_flag = flag_data.get('base_flag_type')
 
-                parent_flag = {
-                    'customer_id': parent_id,
-                    'flag_type': f"{flag['flag_type']}_parent",
-                    'triggered_date': flag['triggered_date'],
-                    'flag_data': flag_data,
-                    'priority': flag['priority']
-                }
-                parent_flags.append(parent_flag)
+            if base_flag and flag_data.get('is_child_flag'):
+                parent_id = flag_data.get('parent_customer_id')
+                if parent_id and (parent_id, base_flag) in parent_own_flags:
+                    # Parent triggered the same flag — suppress child's version
+                    child_flags_suppressed += 1
+                    continue
 
-        if parent_flags:
-            print(f"   📧 Propagating {len(parent_flags)} flags to parents")
-            all_flags.extend(parent_flags)
+            filtered_flags.append(flag)
+
+        all_flags = filtered_flags
+        if child_flags_suppressed > 0:
+            print(f"   🔇 Suppressed {child_flags_suppressed} _child flags (parent already flagged)")
 
         # Build DataFrame
         if not all_flags:

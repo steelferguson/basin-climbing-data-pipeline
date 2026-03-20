@@ -2024,3 +2024,142 @@ ACTIVE_RULES = [
 def get_active_rules():
     """Get list of all active flagging rules."""
     return ACTIVE_RULES
+
+
+# ============================================================================
+# FLAG REGISTRY - Canonical reference for all flags and their meaning
+# ============================================================================
+# Flags that should get _child variants when triggered by a minor.
+# These are activity-based flags where a child's action is meaningful
+# to the parent. Excluded: billing/status flags (active-membership,
+# active-prepaid-pass, has-youth) and parent-specific flags
+# (birthday_party_host_*, fifty_percent_offer_sent).
+CHILD_ELIGIBLE_FLAGS: List[str] = [
+    'ready_for_membership',
+    'first_time_day_pass_2wk_offer',
+    'second_visit_offer_eligible',
+    'second_visit_2wk_offer',
+    '2_week_pass_purchase',
+    'birthday_party_attendee_one_week_out',
+    'new_member',
+    'membership_cancelled_winback',
+]
+
+FLAG_REGISTRY = {
+    'ready_for_membership': {
+        'description': 'Customer purchased day pass(es) in last 2 weeks but has no membership',
+        'child_description': 'Your child visited on a day pass and may be ready for a membership',
+        'category': 'conversion',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    'first_time_day_pass_2wk_offer': {
+        'description': '[Group A] First-time or returning customer eligible for 2-week membership offer',
+        'child_description': 'Your child visited Basin — here is a 2-week membership offer',
+        'category': 'conversion',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    'second_visit_offer_eligible': {
+        'description': '[Group B Step 1] Returning customer eligible for half-price second visit offer',
+        'child_description': 'Your child visited — here is a deal on their next visit',
+        'category': 'conversion',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    'second_visit_2wk_offer': {
+        'description': '[Group B Step 2] Customer returned after 2nd pass offer, eligible for 2-week membership',
+        'child_description': 'Your child came back — here is a 2-week membership offer',
+        'category': 'conversion',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    '2_week_pass_purchase': {
+        'description': 'Customer purchased a 2-week climbing or fitness pass',
+        'child_description': 'Your child started a 2-week pass',
+        'category': 'product',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    'birthday_party_host_one_week_out': {
+        'description': 'Customer is hosting a birthday party in 7 days',
+        'child_description': None,
+        'category': 'birthday',
+        'child_eligible': False,
+        'persistent': False,
+    },
+    'birthday_party_attendee_one_week_out': {
+        'description': 'Customer RSVP\'d yes to a birthday party in 7 days',
+        'child_description': 'Your child has a birthday party at Basin in 7 days',
+        'category': 'birthday',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    'birthday_party_host_six_days_out': {
+        'description': 'Customer is hosting a birthday party in 6 days (day after attendee reminders)',
+        'child_description': None,
+        'category': 'birthday',
+        'child_eligible': False,
+        'persistent': False,
+    },
+    'fifty_percent_offer_sent': {
+        'description': 'Customer received email with 50% off offer (tracking flag)',
+        'child_description': None,
+        'category': 'tracking',
+        'child_eligible': False,
+        'persistent': False,
+    },
+    'membership_cancelled_winback': {
+        'description': 'Recently cancelled member eligible for win-back outreach',
+        'child_description': 'Your child\'s membership was cancelled — here is an offer to come back',
+        'category': 'retention',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    'new_member': {
+        'description': 'Customer is a new member (joined after 6+ months of no membership)',
+        'child_description': 'Your child just joined Basin with a new membership',
+        'category': 'engagement',
+        'child_eligible': True,
+        'persistent': False,
+    },
+    'active-membership': {
+        'description': 'Customer has an active membership (excludes prepaid passes)',
+        'child_description': None,
+        'category': 'status',
+        'child_eligible': False,
+        'persistent': True,
+    },
+    'active-prepaid-pass': {
+        'description': 'Customer has an active prepaid pass (2-week pass, etc.)',
+        'child_description': None,
+        'category': 'status',
+        'child_eligible': False,
+        'persistent': True,
+    },
+    'has-youth': {
+        'description': 'Customer has youth in family/membership',
+        'child_description': None,
+        'category': 'status',
+        'child_eligible': False,
+        'persistent': True,
+    },
+}
+
+
+def is_child_eligible_flag(flag_type: str) -> bool:
+    """Check if a flag type supports _child variants."""
+    return flag_type in CHILD_ELIGIBLE_FLAGS
+
+
+def get_flag_registry():
+    """Return the full flag registry with metadata for all flags."""
+    return FLAG_REGISTRY
+
+
+def get_flag_description(flag_type: str, is_child: bool = False) -> str:
+    """Get human-readable description for a flag, optionally the child version."""
+    entry = FLAG_REGISTRY.get(flag_type, {})
+    if is_child and entry.get('child_description'):
+        return entry['child_description']
+    return entry.get('description', flag_type)
