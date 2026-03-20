@@ -89,6 +89,7 @@ s3_path_customer_identifiers_snapshot = "customers/snapshots/customer_identifier
 s3_path_capitan_customers = "capitan/customers.csv"
 s3_path_capitan_customers_snapshot = "capitan/snapshots/customers.csv"
 s3_path_capitan_relations = "capitan/relations.csv"
+s3_path_capitan_reservations = "capitan/reservations.csv"
 s3_path_family_relationships = "customers/family_relationships.csv"
 s3_path_customer_events = "customers/customer_events.csv"
 s3_path_customer_events_snapshot = "customers/snapshots/customer_events.csv"

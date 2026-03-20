@@ -624,9 +624,26 @@ def upload_capitan_relations_and_family_graph(save_local=False):
             memberships_raw = []
             print("⚠️  No raw memberships data available")
 
+    # Fetch reservations for booking-based family linking
+    print(f"\nFetching reservations for booking-based family links...")
+    try:
+        reservations_df = capitan_fetcher.fetch_reservations()
+        print(f"✅ Fetched {len(reservations_df)} reservations")
+
+        # Upload reservations to S3
+        uploader.upload_to_s3(
+            reservations_df,
+            config.aws_bucket_name,
+            config.s3_path_capitan_reservations
+        )
+        print(f"✅ Uploaded reservations to: {config.s3_path_capitan_reservations}")
+    except Exception as e:
+        print(f"⚠️  Could not fetch reservations: {e}")
+        reservations_df = pd.DataFrame()
+
     # Build family relationship graph
     print(f"\nBuilding family relationship graph...")
-    family_df = build_family_relationships(relations_df, memberships_raw, customers_df)
+    family_df = build_family_relationships(relations_df, memberships_raw, customers_df, reservations_df)
 
     # Save locally if requested
     if save_local:

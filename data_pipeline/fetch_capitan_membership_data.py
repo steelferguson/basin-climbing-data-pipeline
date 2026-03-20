@@ -570,6 +570,75 @@ class CapitanDataFetcher:
 
         return df
 
+    def fetch_reservations(self) -> pd.DataFrame:
+        """
+        Fetch all event reservations from the Capitan API.
+
+        Each reservation has both an attendee (customer_id) and a booker
+        (booking_customer_id). When these differ and the attendee is a minor,
+        the booker is likely a parent — this is used to build family links.
+
+        Returns:
+            DataFrame with reservation data including booking_customer fields.
+        """
+        import time
+
+        print("\n📋 Fetching event reservations...")
+
+        all_reservations = []
+        page = 1
+        page_size = 1000
+
+        while True:
+            url = f"{self.base_url}reservations/?page={page}&page_size={page_size}"
+            try:
+                response = requests.get(url, headers=self.headers, timeout=30)
+                if response.status_code != 200:
+                    print(f"   ⚠️  Status {response.status_code} on page {page}")
+                    break
+
+                data = response.json()
+                results = data.get('results', [])
+
+                for r in results:
+                    all_reservations.append({
+                        'reservation_id': r.get('id'),
+                        'customer_id': r.get('customer_id'),
+                        'first_name': r.get('first_name'),
+                        'last_name': r.get('last_name'),
+                        'birthday': r.get('birthday'),
+                        'email': r.get('email'),
+                        'booking_id': r.get('booking_id'),
+                        'booking_customer_id': r.get('booking_customer_id'),
+                        'booking_customer_first_name': r.get('booking_customer_first_name'),
+                        'booking_customer_last_name': r.get('booking_customer_last_name'),
+                        'booking_customer_email': r.get('booking_customer_email'),
+                        'event_id': r.get('event_id'),
+                        'event_type_name': r.get('event_type_name'),
+                        'event_start_date_local': r.get('event_start_date_local'),
+                        'is_cancelled': r.get('is_cancelled'),
+                        'created_at': r.get('created_at'),
+                    })
+
+                if page % 5 == 0:
+                    print(f"   Page {page}: {len(all_reservations)} reservations so far")
+
+                if not data.get('next'):
+                    break
+                page += 1
+                time.sleep(0.11)
+
+            except Exception as e:
+                print(f"   ⚠️  Error on page {page}: {e}")
+                break
+
+        print(f"✅ Fetched {len(all_reservations)} reservations")
+
+        df = pd.DataFrame(all_reservations)
+        if not df.empty:
+            df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce', utc=True)
+        return df
+
 
 if __name__ == "__main__":
     capitan_token = config.capitan_token

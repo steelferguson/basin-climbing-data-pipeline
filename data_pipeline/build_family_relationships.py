@@ -32,7 +32,8 @@ def calculate_age(birthday):
 def build_family_relationships(
     relations_df: pd.DataFrame,
     memberships_raw: list,  # Raw membership JSON with all_customers
-    customers_df: pd.DataFrame
+    customers_df: pd.DataFrame,
+    reservations_df: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Build comprehensive family relationship graph.
@@ -41,6 +42,7 @@ def build_family_relationships(
         relations_df: Relations from API (customer_id, related_customer_id, relationship)
         memberships_raw: Raw membership JSON with all_customers field
         customers_df: Customer data with ages
+        reservations_df: Reservations from API with booking_customer_id fields
 
     Returns:
         DataFrame with columns:
@@ -197,9 +199,54 @@ def build_family_relationships(
     print(f"   ✅ Found {youth_links} parent-child links from youth memberships")
 
     # =================================================================
+    # SOURCE 4: Reservation Booking Links (medium confidence)
+    # When a parent books an event for a child, the reservation has
+    # booking_customer_id (parent) != customer_id (child attendee).
+    # =================================================================
+    print("\n4. Processing reservation booking links...")
+
+    reservation_links = 0
+
+    if reservations_df is not None and not reservations_df.empty:
+        # Filter to reservations where booker != attendee
+        booked_for_others = reservations_df[
+            (reservations_df['booking_customer_id'].notna()) &
+            (reservations_df['customer_id'].notna()) &
+            (reservations_df['booking_customer_id'] != reservations_df['customer_id']) &
+            (~reservations_df.get('is_cancelled', pd.Series(False)))
+        ].copy()
+
+        # Get unique booker→attendee pairs
+        booking_pairs = booked_for_others[['booking_customer_id', 'customer_id']].drop_duplicates()
+
+        for _, pair in booking_pairs.iterrows():
+            attendee_id = pair['customer_id']
+            booker_id = pair['booking_customer_id']
+
+            # Check if attendee is a minor
+            attendee_data = customers_df[customers_df['customer_id'] == attendee_id]
+            if attendee_data.empty:
+                continue
+
+            attendee_age = attendee_data.iloc[0].get('age')
+            if attendee_age is not None and attendee_age < 18:
+                family_links.append({
+                    'parent_customer_id': booker_id,
+                    'child_customer_id': attendee_id,
+                    'relationship_type': 'parent_child',
+                    'confidence': 'medium',
+                    'source': 'reservation_booking'
+                })
+                reservation_links += 1
+
+        print(f"   ✅ Found {reservation_links} parent-child links from reservation bookings")
+    else:
+        print("   ⚠️  No reservations data available")
+
+    # =================================================================
     # Convert to DataFrame and deduplicate
     # =================================================================
-    print("\n4. Deduplicating and finalizing...")
+    print("\n5. Deduplicating and finalizing...")
 
     if not family_links:
         print("   ⚠️  No family relationships found")
@@ -275,8 +322,16 @@ def main():
         print("⚠️  No raw memberships file found")
         memberships_raw = []
 
+    # Load reservations
+    try:
+        reservations_df = pd.read_csv('data/outputs/capitan_reservations.csv')
+        print(f"✅ Loaded {len(reservations_df)} reservations")
+    except FileNotFoundError:
+        print("⚠️  No reservations file found")
+        reservations_df = pd.DataFrame()
+
     # Build relationships
-    family_df = build_family_relationships(relations_df, memberships_raw, customers_df)
+    family_df = build_family_relationships(relations_df, memberships_raw, customers_df, reservations_df)
 
     # Save
     output_path = 'data/outputs/family_relationships.csv'
