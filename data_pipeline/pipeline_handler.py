@@ -38,11 +38,11 @@ def transform_shopify_to_transaction_schema(shopify_df, start_date, end_date):
 
     # Filter to date range and paid orders only
     shopify_df = shopify_df.copy()
-    shopify_df['created_at'] = pd.to_datetime(shopify_df['created_at'])
+    # Use utc=True to handle mixed timezone offsets (CST -06:00 / CDT -05:00)
+    shopify_df['created_at'] = pd.to_datetime(shopify_df['created_at'], utc=True)
 
     # Remove timezone for comparison
-    if shopify_df['created_at'].dt.tz is not None:
-        shopify_df['created_at'] = shopify_df['created_at'].dt.tz_localize(None)
+    shopify_df['created_at'] = shopify_df['created_at'].dt.tz_localize(None)
 
     # Filter to date range
     mask = (shopify_df['created_at'] >= pd.Timestamp(start_date)) & \
