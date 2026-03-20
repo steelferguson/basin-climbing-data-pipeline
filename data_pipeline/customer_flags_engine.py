@@ -230,7 +230,7 @@ class CustomerFlagsEngine:
                 base_flag_type = flag['flag_type']
 
                 if is_child and customer_flags_config.is_child_eligible_flag(base_flag_type):
-                    flag['flag_type'] = f"{base_flag_type}_child"
+                    flag['flag_type'] = f"child_{base_flag_type}"
                     if 'flag_data' not in flag:
                         flag['flag_data'] = {}
                     flag['flag_data']['is_child_flag'] = True
