@@ -244,9 +244,86 @@ def build_family_relationships(
         print("   ⚠️  No reservations data available")
 
     # =================================================================
+    # SOURCE 5: Fuzzy Last Name Match (low confidence)
+    # Minors with no email and no existing parent link, matched to adults
+    # with a similar last name. Only creates links for children not
+    # already covered by higher-confidence sources.
+    # =================================================================
+    print("\n5. Processing fuzzy last name matches...")
+
+    # Build set of children already linked
+    already_linked_children = set(
+        link['child_customer_id'] for link in family_links
+    )
+
+    # Get unlinked minors (no email, under 18, not already linked)
+    unlinked_minors = customers_df[
+        (customers_df['is_minor'] == True) &
+        (customers_df['email'].isna() | (customers_df['email'] == '')) &
+        (~customers_df['customer_id'].isin(already_linked_children))
+    ].copy()
+
+    # Get adults with email
+    adults_with_email = customers_df[
+        (customers_df['age'] >= 18) &
+        (customers_df['email'].notna()) &
+        (customers_df['email'] != '')
+    ].copy()
+
+    fuzzy_links = 0
+
+    if len(unlinked_minors) > 0 and len(adults_with_email) > 0:
+        # Normalize last names for comparison
+        unlinked_minors['last_name_lower'] = unlinked_minors['last_name'].str.strip().str.lower()
+        adults_with_email['last_name_lower'] = adults_with_email['last_name'].str.strip().str.lower()
+
+        # Build adult lookup by last name
+        adults_by_last_name = adults_with_email.groupby('last_name_lower')
+
+        for _, child in unlinked_minors.iterrows():
+            child_last = child.get('last_name_lower')
+            if not child_last or pd.isna(child_last):
+                continue
+
+            # Exact last name match first
+            if child_last in adults_by_last_name.groups:
+                matching_adults = adults_by_last_name.get_group(child_last)
+
+                # If exactly one adult matches, high-ish confidence
+                # If multiple adults match, pick the one with active membership or most check-ins
+                if len(matching_adults) == 1:
+                    parent = matching_adults.iloc[0]
+                    family_links.append({
+                        'parent_customer_id': parent['customer_id'],
+                        'child_customer_id': child['customer_id'],
+                        'relationship_type': 'parent_child',
+                        'confidence': 'low',
+                        'source': 'last_name_match'
+                    })
+                    fuzzy_links += 1
+                elif len(matching_adults) <= 5:
+                    # Multiple adults with same last name — pick one with active membership
+                    active = matching_adults[matching_adults.get('has_active_membership', pd.Series(False)) == True]
+                    if len(active) == 1:
+                        parent = active.iloc[0]
+                        family_links.append({
+                            'parent_customer_id': parent['customer_id'],
+                            'child_customer_id': child['customer_id'],
+                            'relationship_type': 'parent_child',
+                            'confidence': 'low',
+                            'source': 'last_name_match_active_member'
+                        })
+                        fuzzy_links += 1
+
+        print(f"   ✅ Found {fuzzy_links} parent-child links from last name matching")
+        print(f"   (from {len(unlinked_minors)} unlinked minors without email)")
+    else:
+        print("   ⚠️  No unlinked minors to match")
+
+    # =================================================================
     # Convert to DataFrame and deduplicate
     # =================================================================
-    print("\n5. Deduplicating and finalizing...")
+    print("\n6. Deduplicating and finalizing...")
 
     if not family_links:
         print("   ⚠️  No family relationships found")
