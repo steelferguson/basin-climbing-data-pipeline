@@ -125,9 +125,10 @@ class CustomerFlagsEngine:
             parent_contact_added = 0
             self.child_to_parent = {}
             if not df_family.empty:
-                # Convert family relationship IDs to string to match dictionary keys
-                df_family['child_customer_id'] = df_family['child_customer_id'].astype(str)
-                df_family['parent_customer_id'] = df_family['parent_customer_id'].astype(str)
+                # Convert to int first (handles float64 from CSV), then to string
+                # so "2465914.0" becomes "2465914" matching checkin IDs
+                df_family['child_customer_id'] = df_family['child_customer_id'].astype(float).astype(int).astype(str)
+                df_family['parent_customer_id'] = df_family['parent_customer_id'].astype(float).astype(int).astype(str)
 
                 for _, row in df_family.iterrows():
                     child_id = row['child_customer_id']
@@ -226,17 +227,18 @@ class CustomerFlagsEngine:
                 # If this customer is a child (has parent in family graph) and
                 # the flag supports _child variants, add "_child" suffix.
                 # This enables campaigns to target parents with "Your child..." messaging.
-                is_child = customer_id in self.child_to_parent
+                is_child = str(customer_id) in self.child_to_parent
                 base_flag_type = flag['flag_type']
 
                 if is_child and customer_flags_config.is_child_eligible_flag(base_flag_type):
+                    cid_str = str(customer_id)
                     flag['flag_type'] = f"child_{base_flag_type}"
                     if 'flag_data' not in flag:
                         flag['flag_data'] = {}
                     flag['flag_data']['is_child_flag'] = True
                     flag['flag_data']['base_flag_type'] = base_flag_type
-                    flag['flag_data']['parent_customer_id'] = self.child_to_parent[customer_id]
-                    flag['flag_data']['is_using_parent_contact'] = self.is_using_parent_contact.get(customer_id, False)
+                    flag['flag_data']['parent_customer_id'] = self.child_to_parent[cid_str]
+                    flag['flag_data']['is_using_parent_contact'] = self.is_using_parent_contact.get(cid_str, False)
                     # Add descriptive metadata for the tag
                     flag['flag_data']['flag_description'] = customer_flags_config.get_flag_description(base_flag_type, is_child=True)
                 else:
@@ -546,6 +548,47 @@ class CustomerFlagsEngine:
 
             df_checkin_events = pd.DataFrame(checkin_events)
             print(f"   ✅ Converted {len(df_checkin_events)} checkins to events")
+
+            # 2a. Create child-attributed day_pass_purchase events
+            # When a child checks in with a day pass (ENT/GUE), the purchase
+            # event is on the parent's account. Create an attributed purchase
+            # on the child so flags like ready_for_membership can fire.
+            print("\n📂 Creating child-attributed purchase events...")
+            try:
+                obj_family = s3_client.get_object(
+                    Bucket=bucket_name,
+                    Key='customers/family_relationships.csv'
+                )
+                df_family = pd.read_csv(StringIO(obj_family['Body'].read().decode('utf-8')))
+                child_ids = set(df_family['child_customer_id'].astype(int))
+
+                child_day_pass_checkins = df_checkins[
+                    (df_checkins['customer_id'].isin(child_ids)) &
+                    (df_checkins['entry_method'].isin(['ENT', 'GUE']))
+                ]
+
+                child_purchase_events = []
+                for _, row in child_day_pass_checkins.iterrows():
+                    child_purchase_events.append({
+                        'customer_id': row['customer_id'],
+                        'event_type': 'day_pass_purchase',
+                        'event_date': row['checkin_datetime'],
+                        'event_data': {
+                            'entry_method_description': row.get('entry_method_description', ''),
+                            'entry_method': row.get('entry_method', ''),
+                            'checkin_id': row.get('checkin_id', ''),
+                            'source': 'child_attribution',
+                        }
+                    })
+
+                if child_purchase_events:
+                    df_child_purchases = pd.DataFrame(child_purchase_events)
+                    df_checkin_events = pd.concat([df_checkin_events, df_child_purchases], ignore_index=True)
+                    print(f"   ✅ Created {len(child_purchase_events)} child-attributed day_pass_purchase events")
+                else:
+                    print(f"   ℹ️  No child day pass checkins found")
+            except Exception as e:
+                print(f"   ⚠️  Could not create child-attributed events: {e}")
 
             # Merge with existing events
             df_all_events = pd.concat([df_events, df_checkin_events], ignore_index=True)
