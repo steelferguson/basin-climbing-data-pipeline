@@ -192,13 +192,46 @@ def fetch_stripe_and_square_and_combine(days=2, end_date=datetime.datetime.now()
                 if r.get('status') == 'COMPLETED':
                     refund_amount = r.get('amount_money', {}).get('amount', 0) / 100
                     refund_date = pd.to_datetime(r.get('created_at')).date()
+                    order_id = r.get('order_id')
+
+                    # Fetch the return order to get exact tax/discount breakdown
+                    # Square's Total Sales decomposes refunds: Returns excludes tax & discount
+                    refund_tax = 0
+                    refund_discount = 0
+                    refund_desc = f"Square refund for payment {r.get('payment_id', 'unknown')}"
+                    if order_id:
+                        try:
+                            order_result = sq_client.orders.retrieve_order(order_id=order_id)
+                            if hasattr(order_result, 'is_success') and order_result.is_success():
+                                order = order_result.body.get('order', {})
+                                for ret in order.get('returns', []):
+                                    for ri in ret.get('return_line_items', []):
+                                        refund_tax += ri.get('total_tax_money', {}).get('amount', 0) / 100
+                                        refund_discount += ri.get('total_discount_money', {}).get('amount', 0) / 100
+                                        item_name = ri.get('name', '')
+                                        if item_name:
+                                            refund_desc = f"Square refund: {item_name}"
+                        except Exception:
+                            pass
+
+                    # If we couldn't get exact breakdown, estimate tax at 8.25%
+                    if refund_tax == 0 and refund_amount > 0:
+                        refund_tax = refund_amount - (refund_amount / 1.0825)
+
+                    # Square's Total Sales formula decomposes refunds:
+                    # Returns (excl tax/discount) reduces Net Sales,
+                    # tax on return reduces Tax line,
+                    # discount on return reverses from both Returns and Discounts.
+                    # Net impact on Total Sales = -(refund) + 2*(discount_on_return)
+                    total_sales_impact = -refund_amount + 2 * refund_discount
+
                     sq_refund_rows.append({
                         'transaction_id': f"square_refund_{r.get('id')}",
-                        'Description': f"Square refund for payment {r.get('payment_id', 'unknown')}",
-                        'Pre-Tax Amount': -refund_amount / 1.0825,
-                        'Tax Amount': -refund_amount + (refund_amount / 1.0825),
-                        'Total Amount': -refund_amount,
-                        'Discount Amount': 0,
+                        'Description': refund_desc,
+                        'Pre-Tax Amount': -(refund_amount - refund_tax),
+                        'Tax Amount': -refund_tax,
+                        'Total Amount': total_sales_impact,
+                        'Discount Amount': refund_discount,
                         'Name': 'Refund',
                         'Date': refund_date,
                         'revenue_category': 'Refund',
