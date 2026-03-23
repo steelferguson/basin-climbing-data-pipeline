@@ -166,6 +166,58 @@ def fetch_stripe_and_square_and_combine(days=2, end_date=datetime.datetime.now()
         start_date, end_date, save_json=False, save_csv=False
     )
 
+    # Fetch Square refunds for the same period
+    print(f"Fetching Square refunds from {start_date} to {end_date}")
+    try:
+        from square.client import Client
+        from square.http.auth.o_auth_2 import BearerAuthCredentials
+
+        sq_client = Client(
+            bearer_auth_credentials=BearerAuthCredentials(access_token=square_token),
+            environment='production'
+        )
+
+        sq_refund_rows = []
+        cursor = None
+        while True:
+            params = {
+                'begin_time': start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                'end_time': end_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                'limit': 100,
+            }
+            if cursor:
+                params['cursor'] = cursor
+            result = sq_client.refunds.list_payment_refunds(**params)
+            for r in result.body.get('refunds', []):
+                if r.get('status') == 'COMPLETED':
+                    refund_amount = r.get('amount_money', {}).get('amount', 0) / 100
+                    refund_date = pd.to_datetime(r.get('created_at')).date()
+                    sq_refund_rows.append({
+                        'transaction_id': f"square_refund_{r.get('id')}",
+                        'Description': f"Square refund for payment {r.get('payment_id', 'unknown')}",
+                        'Pre-Tax Amount': -refund_amount / 1.0825,
+                        'Tax Amount': -refund_amount + (refund_amount / 1.0825),
+                        'Total Amount': -refund_amount,
+                        'Discount Amount': 0,
+                        'Name': 'Refund',
+                        'Date': refund_date,
+                        'revenue_category': 'Refund',
+                        'Data Source': 'Square',
+                        'Day Pass Count': 0,
+                    })
+            cursor = result.body.get('cursor')
+            if not cursor:
+                break
+
+        if sq_refund_rows:
+            sq_refunds_df = pd.DataFrame(sq_refund_rows)
+            print(f"Adding {len(sq_refunds_df)} Square refunds totaling ${-sq_refunds_df['Total Amount'].sum():,.2f}")
+            square_df = pd.concat([square_df, sq_refunds_df], ignore_index=True)
+        else:
+            print("No Square refunds found in this period")
+    except Exception as e:
+        print(f"Warning: Could not fetch Square refunds: {e}")
+
     # Fetch Shopify data from S3 and transform to transaction schema
     print(f"Fetching Shopify orders from S3...")
     try:
@@ -290,7 +342,10 @@ def replace_date_range_in_transaction_df_in_s3(start_date, end_date):
     print(f"Replacing data from {start_date.date()} to {end_date.date()} ({days} days)")
 
     # Fetch fresh data for the specified range
-    df_new = fetch_stripe_and_square_and_combine(days=days, end_date=end_date)
+    # Add 1 day to end_date so APIs include the full last day
+    # (APIs use exclusive end times, so Jan 31 00:00 excludes Jan 31)
+    fetch_end = end_date + datetime.timedelta(days=1)
+    df_new = fetch_stripe_and_square_and_combine(days=days, end_date=fetch_end)
 
     print("Downloading existing combined df from s3")
     uploader = upload_data.DataUploader()

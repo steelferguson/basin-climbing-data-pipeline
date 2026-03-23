@@ -858,6 +858,18 @@ class SquareFetcher:
                 orders_checked += 1
                 order = orders_dict.get(order_id)
 
+                if not order:
+                    # Order not in search results — likely created before the date
+                    # range but paid within it. Fetch directly by ID.
+                    try:
+                        direct_result = client.orders.retrieve_order(order_id=order_id)
+                        if hasattr(direct_result, 'is_success') and direct_result.is_success():
+                            order = direct_result.body.get('order', {})
+                            orders_dict[order_id] = order
+                            print(f"  Fetched missing order {order_id} directly (created {order.get('created_at', 'unknown')[:10]})")
+                    except Exception as e:
+                        print(f"  Could not fetch order {order_id}: {e}")
+
                 if order:
                     order_state = order.get('state') if isinstance(order, dict) else order.state
 
@@ -867,7 +879,7 @@ class SquareFetcher:
                     else:
                         print(f"Payment {payment_id} has order {order_id} with state '{order_state}' - FILTERED OUT")
                 else:
-                    print(f"Payment {payment_id} order {order_id} not found in search results - FILTERED OUT")
+                    print(f"Payment {payment_id} order {order_id} not found - FILTERED OUT")
             else:
                 payments_without_orders += 1
 
