@@ -253,10 +253,11 @@ class FirstTimeDayPass2WeekOfferFlag(FlagRule):
         """
         Check if customer is eligible for direct 2-week membership offer.
         """
-        # Criteria 0: Must be in Group A (email/phone hash last digit 0-4)
-        ab_group = get_customer_ab_group(customer_id, email=email, phone=phone)
-        if ab_group != "A":
-            return None  # Group B customers use different flag
+        # AB TEST REMOVED (2026-03-23): All customers now get direct 2-week offer
+        # Previously: Group A only (email/phone hash last digit 0-4)
+        # ab_group = get_customer_ab_group(customer_id, email=email, phone=phone)
+        # if ab_group != "A":
+        #     return None  # Group B customers use different flag
 
         # Get all day pass events (from checkins or transactions)
         # day_pass_purchase events are created from:
@@ -361,8 +362,7 @@ class FirstTimeDayPass2WeekOfferFlag(FlagRule):
             'flag_type': self.flag_type,
             'triggered_date': today,
             'flag_data': {
-                'ab_group': 'A',
-                'experiment_id': 'day_pass_conversion_2026_02',
+                # AB TEST REMOVED (2026-03-23): All customers now go to 2-week offer
                 'most_recent_day_pass_date': most_recent_day_pass['event_date'].isoformat(),
                 'days_since_day_pass': (today - most_recent_day_pass['event_date']).days,
                 'total_day_passes': len(day_pass_events),
@@ -2003,9 +2003,10 @@ class HasYouthFlag(FlagRule):
 # List of all active rules
 ACTIVE_RULES = [
     ReadyForMembershipFlag(),
-    FirstTimeDayPass2WeekOfferFlag(),      # Group A: Direct 2-week offer
-    SecondVisitOfferEligibleFlag(),        # Group B Step 1: 2nd pass offer
-    SecondVisit2WeekOfferFlag(),           # Group B Step 2: 2-week offer after return
+    FirstTimeDayPass2WeekOfferFlag(),      # All customers: Direct 2-week offer (AB test removed 2026-03-23)
+    # AB TEST REMOVED (2026-03-23): Group B flags disabled - all customers now get direct 2-week offer
+    # SecondVisitOfferEligibleFlag(),        # Group B Step 1: 2nd pass offer (DISABLED)
+    # SecondVisit2WeekOfferFlag(),           # Group B Step 2: 2-week offer after return (DISABLED)
     TwoWeekPassUserFlag(),                 # Track 2-week pass usage
     BirthdayPartyHostOneWeekOutFlag(),     # Host has party in 7 days
     BirthdayPartyAttendeeOneWeekOutFlag(), # Attendee has party in 7 days
