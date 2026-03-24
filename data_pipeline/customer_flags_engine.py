@@ -34,142 +34,96 @@ class CustomerFlagsEngine:
 
     def load_customer_contact_info(self):
         """
-        Load customer emails and phones from S3 for AB group assignment.
+        Load customer contact info from the unified customer master (v2).
 
-        Loads from TWO sources to handle both ID types in the system:
-        1. customers_master.csv - has UUID-based customer_ids (from customer_events.csv)
-        2. capitan/customers.csv - has Capitan numeric IDs (from direct checkin loading)
-
-        For customers without their own contact info, looks up parent contact
-        from the family relationship graph.
+        customer_master_v2.csv has everything pre-computed:
+        - contact_email/contact_phone (own or parent's)
+        - is_using_parent_contact flag
+        - parent_customer_id for child→parent mapping
+        - UUID for backward compat with customer_events.csv
         """
         try:
-            # Try S3 first
             aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
             aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
 
-            if aws_access_key_id and aws_secret_access_key:
-                s3_client = boto3.client(
-                    's3',
-                    aws_access_key_id=aws_access_key_id,
-                    aws_secret_access_key=aws_secret_access_key
-                )
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key
+            )
 
-                # Load customers_master (has UUID customer_ids that match customer_events.csv)
-                obj = s3_client.get_object(
-                    Bucket='basin-climbing-data-prod',
-                    Key='customers/customers_master.csv'
-                )
-                df_customers_master = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
-                print(f"   Loaded {len(df_customers_master)} customers from customers_master.csv (UUIDs)")
+            # Load unified customer master
+            obj = s3_client.get_object(
+                Bucket='basin-climbing-data-prod',
+                Key='customers/customer_master_v2.csv'
+            )
+            df_master = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            print(f"   Loaded {len(df_master)} customers from customer_master_v2.csv")
 
-                # Also load capitan/customers.csv (has Capitan numeric IDs for direct checkin events)
-                obj_capitan = s3_client.get_object(
-                    Bucket='basin-climbing-data-prod',
-                    Key='capitan/customers.csv'
-                )
-                df_customers_capitan = pd.read_csv(StringIO(obj_capitan['Body'].read().decode('utf-8')))
-                print(f"   Loaded {len(df_customers_capitan)} customers from capitan/customers.csv (Capitan IDs)")
-
-                # Load family relationships graph
-                try:
-                    obj_family = s3_client.get_object(
-                        Bucket='basin-climbing-data-prod',
-                        Key='customers/family_relationships.csv'
-                    )
-                    df_family = pd.read_csv(StringIO(obj_family['Body'].read().decode('utf-8')))
-                    print(f"   Loaded {len(df_family)} family relationships")
-                except Exception as e:
-                    print(f"   ⚠️  Could not load family relationships: {e}")
-                    df_family = pd.DataFrame()
-            else:
-                # Fall back to local files
-                df_customers_master = pd.read_csv('data/outputs/customers_master.csv')
-                df_customers_capitan = pd.read_csv('data/outputs/capitan_customers.csv')
-                try:
-                    df_family = pd.read_csv('data/outputs/family_relationships.csv')
-                    print(f"   Loaded {len(df_family)} family relationships from local file")
-                except FileNotFoundError:
-                    print(f"   ⚠️  No family relationships file found locally")
-                    df_family = pd.DataFrame()
-
-            # Build initial email and phone lookup dicts from BOTH sources
+            # Build lookups from the unified table
             self.customer_emails = {}
             self.customer_phones = {}
             self.is_using_parent_contact = {}
-
-            # First, add customers_master (UUID customer_ids, 'primary_email'/'primary_phone')
-            df_customers_master['customer_id'] = df_customers_master['customer_id'].astype(str)
-            for _, row in df_customers_master.iterrows():
-                cid = row['customer_id']
-                self.customer_emails[cid] = row.get('primary_email')
-                self.customer_phones[cid] = row.get('primary_phone')
-                self.is_using_parent_contact[cid] = False
-
-            # Then, add capitan customers (numeric IDs, 'email'/'phone')
-            # This handles events loaded directly from capitan/checkins.csv
-            df_customers_capitan['customer_id'] = df_customers_capitan['customer_id'].astype(str)
-            for _, row in df_customers_capitan.iterrows():
-                cid = row['customer_id']
-                # Only add if not already present (prefer customers_master)
-                if cid not in self.customer_emails:
-                    self.customer_emails[cid] = row.get('email')
-                    self.customer_phones[cid] = row.get('phone')
-                    self.is_using_parent_contact[cid] = False
-
-            initial_with_email = sum(1 for e in self.customer_emails.values() if pd.notna(e) and e != '')
-            initial_with_phone = sum(1 for p in self.customer_phones.values() if pd.notna(p) and p != '')
-
-            # Enrich with parent contact info for customers without their own
-            # Also build child->parent mapping for flag propagation
-            parent_contact_added = 0
             self.child_to_parent = {}
-            if not df_family.empty:
-                # Convert to int first (handles float64 from CSV), then to string
-                # so "2465914.0" becomes "2465914" matching checkin IDs
-                df_family['child_customer_id'] = df_family['child_customer_id'].astype(float).astype(int).astype(str)
-                df_family['parent_customer_id'] = df_family['parent_customer_id'].astype(float).astype(int).astype(str)
 
-                for _, row in df_family.iterrows():
-                    child_id = row['child_customer_id']
-                    parent_id = row['parent_customer_id']
+            for _, row in df_master.iterrows():
+                cid = str(row['customer_id'])
 
-                    # Store child->parent mapping for flag propagation
-                    # (keep first parent if multiple - they'll get same email anyway)
-                    if child_id not in self.child_to_parent:
-                        self.child_to_parent[child_id] = parent_id
+                # Use contact_email/phone (already includes parent fallback)
+                self.customer_emails[cid] = row.get('contact_email') if pd.notna(row.get('contact_email')) else None
+                self.customer_phones[cid] = row.get('contact_phone') if pd.notna(row.get('contact_phone')) else None
+                self.is_using_parent_contact[cid] = bool(row.get('is_using_parent_contact', False))
 
-                    # Check if child lacks contact info
-                    child_email = self.customer_emails.get(child_id)
-                    child_phone = self.customer_phones.get(child_id)
-                    has_own_email = pd.notna(child_email) and child_email != ''
-                    has_own_phone = pd.notna(child_phone) and child_phone != ''
+                # Child→parent mapping
+                parent_id = row.get('parent_customer_id')
+                if pd.notna(parent_id):
+                    self.child_to_parent[cid] = str(int(float(parent_id)))
 
-                    if not (has_own_email and has_own_phone):
-                        # Look up parent contact
-                        parent_email = self.customer_emails.get(parent_id)
-                        parent_phone = self.customer_phones.get(parent_id)
+                # Also register by UUID so customer_events.csv lookups work
+                uuid = row.get('uuid')
+                if pd.notna(uuid):
+                    uuid_str = str(uuid)
+                    self.customer_emails[uuid_str] = self.customer_emails[cid]
+                    self.customer_phones[uuid_str] = self.customer_phones[cid]
+                    self.is_using_parent_contact[uuid_str] = self.is_using_parent_contact[cid]
+                    if cid in self.child_to_parent:
+                        self.child_to_parent[uuid_str] = self.child_to_parent[cid]
 
-                        # Use parent contact if available
-                        if not has_own_email and pd.notna(parent_email) and parent_email != '':
-                            self.customer_emails[child_id] = parent_email
-                            self.is_using_parent_contact[child_id] = True
-                            parent_contact_added += 1
+            with_email = sum(1 for e in self.customer_emails.values() if pd.notna(e) and e != '')
+            with_phone = sum(1 for p in self.customer_phones.values() if pd.notna(p) and p != '')
 
-                        if not has_own_phone and pd.notna(parent_phone) and parent_phone != '':
-                            self.customer_phones[child_id] = parent_phone
-                            self.is_using_parent_contact[child_id] = True
-
-            final_with_email = sum(1 for e in self.customer_emails.values() if pd.notna(e) and e != '')
-            final_with_phone = sum(1 for p in self.customer_phones.values() if pd.notna(p) and p != '')
-
-            print(f"   Loaded contact info for {len(self.customer_emails)} customers")
-            print(f"   - {initial_with_email} with own emails → {final_with_email} after parent lookup (+{final_with_email - initial_with_email})")
-            print(f"   - {initial_with_phone} with own phones → {final_with_phone} after parent lookup (+{final_with_phone - initial_with_phone})")
-            print(f"   - {parent_contact_added} customers now reachable via parent contact")
+            print(f"   Loaded contact info for {len(df_master)} customers ({with_email} with email, {with_phone} with phone)")
+            print(f"   Child→parent mappings: {len(self.child_to_parent)}")
+            print(f"   Using parent contact: {sum(1 for v in self.is_using_parent_contact.values() if v)}")
 
         except Exception as e:
-            print(f"   ⚠️  Could not load customer contact info: {e}")
+            print(f"   ⚠️  Could not load customer_master_v2, falling back to old method: {e}")
+            self._load_customer_contact_info_legacy()
+
+    def _load_customer_contact_info_legacy(self):
+        """Legacy fallback — load from old customers_master.csv + capitan/customers.csv."""
+        try:
+            s3_client = boto3.client('s3',
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+            )
+            obj = s3_client.get_object(Bucket='basin-climbing-data-prod', Key='capitan/customers.csv')
+            df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+
+            self.customer_emails = {}
+            self.customer_phones = {}
+            self.is_using_parent_contact = {}
+            self.child_to_parent = {}
+
+            for _, row in df.iterrows():
+                cid = str(row['customer_id'])
+                self.customer_emails[cid] = row.get('email') if pd.notna(row.get('email')) else None
+                self.customer_phones[cid] = row.get('phone') if pd.notna(row.get('phone')) else None
+                self.is_using_parent_contact[cid] = False
+
+            print(f"   [Legacy] Loaded {len(self.customer_emails)} customers from capitan/customers.csv")
+        except Exception as e:
+            print(f"   ⚠️  Legacy fallback also failed: {e}")
             self.customer_emails = {}
             self.customer_phones = {}
             self.is_using_parent_contact = {}
