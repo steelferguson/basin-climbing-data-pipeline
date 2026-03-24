@@ -28,17 +28,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# Flows we want to track
-TRACKED_FLOWS = {
-    'T2pdRa': 'Day Pass -> 2 Week Pass JOURNEY 1',
-    'UASb4P': 'TEMP - Day Pass 2wk Retry (Skip Email 1)',
-    # Add more flows as needed
-}
+# Track ALL flows — no longer filtering to a hardcoded list.
+# Flow names are captured from the event data itself.
 
-# Klaviyo metric IDs
+# Klaviyo metric IDs for lead timeline events
 METRICS = {
     'received_email': 'UXqb4y',
     'received_sms': 'XFm8qH',
+    'opened_email': 'TaYhy5',
+    'clicked_email': 'SCAvgQ',
 }
 
 
@@ -123,6 +121,25 @@ class KlaviyoFlowEventSyncer:
 
         return self._existing_events
 
+    def _fetch_flow_names(self) -> Dict[str, str]:
+        """Fetch all flow names from Klaviyo for ID-to-name resolution."""
+        flow_names = {}
+        url = 'https://a.klaviyo.com/api/flows?page[size]=50'
+        while url:
+            self._rate_limit()
+            try:
+                response = requests.get(url, headers=self.headers, timeout=30)
+                if response.status_code != 200:
+                    break
+                data = response.json()
+                for flow in data.get('data', []):
+                    flow_names[flow['id']] = flow.get('attributes', {}).get('name', flow['id'])
+                url = data.get('links', {}).get('next')
+            except Exception:
+                break
+        print(f"Loaded {len(flow_names)} flow names from Klaviyo")
+        return flow_names
+
     def fetch_flow_events(
         self,
         metric_id: str,
@@ -133,7 +150,8 @@ class KlaviyoFlowEventSyncer:
         """
         Fetch flow-related events for a specific metric.
 
-        Returns events only for tracked flows.
+        Captures ALL flows — flow names resolved dynamically.
+        Also captures campaign events (non-flow) for complete timeline.
         """
         since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime('%Y-%m-%dT00:00:00Z')
         url = f'https://a.klaviyo.com/api/events?filter=and(equals(metric_id,"{metric_id}"),greater-or-equal(datetime,{since}))&page[size]=100&include=profile&sort=-datetime'
@@ -165,9 +183,10 @@ class KlaviyoFlowEventSyncer:
                     attrs = event.get('attributes', {})
                     event_props = attrs.get('event_properties', {})
                     flow_id = event_props.get('$flow', '')
+                    campaign_name = event_props.get('campaign_name', '')
 
-                    # Only include events from tracked flows
-                    if flow_id not in TRACKED_FLOWS:
+                    # Capture both flow and campaign events
+                    if not flow_id and not campaign_name:
                         continue
 
                     profile_id = event.get('relationships', {}).get('profile', {}).get('data', {}).get('id', '')
@@ -180,7 +199,8 @@ class KlaviyoFlowEventSyncer:
                         'email': profile.get('email', '').lower(),
                         'profile_id': profile_id,
                         'flow_id': flow_id,
-                        'flow_name': TRACKED_FLOWS.get(flow_id, flow_id),
+                        'flow_name': '',  # resolved later
+                        'campaign_name': campaign_name,
                         'subject': event_props.get('Subject', ''),
                         'message_id': event_props.get('$message', ''),
                     })
@@ -188,7 +208,7 @@ class KlaviyoFlowEventSyncer:
                 url = data.get('links', {}).get('next')
 
                 if page_count % 10 == 0:
-                    print(f"   Page {page_count}: {len(events)} flow events so far...")
+                    print(f"   Page {page_count}: {len(events)} events so far...")
 
             except Exception as e:
                 print(f"   Error: {e}")
@@ -197,26 +217,33 @@ class KlaviyoFlowEventSyncer:
         return events
 
     def fetch_all_flow_events(self, days_back: int = 30) -> pd.DataFrame:
-        """Fetch all flow events for tracked flows."""
-        print(f"\nFetching Klaviyo flow events (last {days_back} days)")
-        print(f"Tracked flows: {list(TRACKED_FLOWS.values())}")
+        """Fetch all Klaviyo events (flows + campaigns) for lead timelines."""
+        print(f"\nFetching Klaviyo events (last {days_back} days)")
+        print(f"Metrics: {list(METRICS.keys())}")
         print("-" * 60)
+
+        # Fetch flow names for ID resolution
+        flow_names = self._fetch_flow_names()
 
         all_events = []
 
         for metric_name, metric_id in METRICS.items():
             print(f"\nFetching {metric_name}...")
             events = self.fetch_flow_events(metric_id, metric_name, days_back)
-            print(f"   Found {len(events)} flow events")
+            print(f"   Found {len(events)} events")
             all_events.extend(events)
 
         df = pd.DataFrame(all_events)
 
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
+            # Resolve flow names from IDs
+            df['flow_name'] = df['flow_id'].map(flow_names).fillna(df['flow_id'])
             df = df.sort_values('timestamp', ascending=False)
 
-        print(f"\nTotal flow events: {len(df)}")
+        flow_count = df[df['flow_id'] != '']['flow_id'].nunique() if not df.empty else 0
+        campaign_count = df[df['campaign_name'] != '']['campaign_name'].nunique() if not df.empty else 0
+        print(f"\nTotal events: {len(df)} ({flow_count} flows, {campaign_count} campaigns)")
         return df
 
     def convert_to_customer_events(self, flow_events: pd.DataFrame) -> List[Dict]:
@@ -250,21 +277,27 @@ class KlaviyoFlowEventSyncer:
                 continue
 
             # Determine event type based on metric
-            if row['metric_name'] == 'received_email':
-                event_type = 'klaviyo_email_received'
-            elif row['metric_name'] == 'received_sms':
-                event_type = 'klaviyo_sms_received'
-            else:
-                event_type = f"klaviyo_{row['metric_name']}"
+            event_type_map = {
+                'received_email': 'klaviyo_email_received',
+                'received_sms': 'klaviyo_sms_received',
+                'opened_email': 'klaviyo_email_opened',
+                'clicked_email': 'klaviyo_email_clicked',
+            }
+            event_type = event_type_map.get(row['metric_name'], f"klaviyo_{row['metric_name']}")
+
+            # Determine source label (flow name or campaign name)
+            source_label = row.get('flow_name', '') or row.get('campaign_name', '') or 'unknown'
 
             # Build event data
             event_data = {
                 'klaviyo_event_id': row['event_id'],
-                'flow_id': row['flow_id'],
-                'flow_name': row['flow_name'],
+                'flow_id': row.get('flow_id', ''),
+                'flow_name': row.get('flow_name', ''),
+                'campaign_name': row.get('campaign_name', ''),
                 'message_id': row['message_id'],
                 'subject': row['subject'],
                 'email': email,
+                'source_type': 'flow' if row.get('flow_id') else 'campaign',
             }
 
             new_events.append({
@@ -273,7 +306,7 @@ class KlaviyoFlowEventSyncer:
                 'event_type': event_type,
                 'event_source': 'klaviyo',
                 'source_confidence': 1.0,
-                'event_details': f"{row['flow_name']}: {row['subject'][:50]}" if row['subject'] else row['flow_name'],
+                'event_details': f"{source_label}: {row['subject'][:50]}" if row['subject'] else source_label,
                 'event_data': json.dumps(event_data)
             })
 
@@ -295,8 +328,11 @@ class KlaviyoFlowEventSyncer:
 
         analysis = {}
 
-        for flow_id, flow_name in TRACKED_FLOWS.items():
+        # Analyze all flows found in the data
+        flow_ids = flow_events[flow_events['flow_id'] != '']['flow_id'].unique()
+        for flow_id in flow_ids:
             flow_df = flow_events[flow_events['flow_id'] == flow_id]
+            flow_name = flow_df.iloc[0].get('flow_name', flow_id)
 
             if flow_df.empty:
                 continue
