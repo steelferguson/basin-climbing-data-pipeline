@@ -706,17 +706,65 @@ class ShopifyFlagSyncer:
         """
         Load customer data from S3 to get email/phone for matching.
 
+        Loads from TWO sources to handle both ID formats:
+        1. capitan/customers.csv - has numeric Capitan IDs
+        2. customers/customers_master.csv - has UUID customer_ids
+
         Returns:
             DataFrame with customer_id, email, phone
         """
         try:
+            # Load Capitan customers (numeric IDs)
             obj = self.s3_client.get_object(
                 Bucket=self.bucket_name,
                 Key="capitan/customers.csv"
             )
-            df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
-            print(f"✅ Loaded {len(df)} customers from S3")
-            return df[['customer_id', 'email', 'phone', 'first_name', 'last_name']]
+            df_capitan = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            df_capitan = df_capitan[['customer_id', 'email', 'phone', 'first_name', 'last_name']].copy()
+            df_capitan['customer_id'] = df_capitan['customer_id'].astype(str)
+            print(f"✅ Loaded {len(df_capitan)} customers from capitan/customers.csv")
+
+            # Load customers_master (UUID IDs) - these map to the same people but with UUID format
+            try:
+                obj_master = self.s3_client.get_object(
+                    Bucket=self.bucket_name,
+                    Key="customers/customers_master.csv"
+                )
+                df_master = pd.read_csv(StringIO(obj_master['Body'].read().decode('utf-8')))
+                # Rename columns to match expected format
+                df_master = df_master.rename(columns={
+                    'primary_email': 'email',
+                    'primary_phone': 'phone',
+                    'primary_name': 'full_name'
+                })
+                # Split full_name into first/last if available
+                if 'full_name' in df_master.columns:
+                    df_master['first_name'] = df_master['full_name'].apply(
+                        lambda x: str(x).split()[0] if pd.notna(x) and str(x).strip() else 'Unknown'
+                    )
+                    df_master['last_name'] = df_master['full_name'].apply(
+                        lambda x: ' '.join(str(x).split()[1:]) if pd.notna(x) and len(str(x).split()) > 1 else ''
+                    )
+                else:
+                    df_master['first_name'] = 'Unknown'
+                    df_master['last_name'] = ''
+
+                df_master = df_master[['customer_id', 'email', 'phone', 'first_name', 'last_name']].copy()
+                df_master['customer_id'] = df_master['customer_id'].astype(str)
+                print(f"✅ Loaded {len(df_master)} customers from customers/customers_master.csv (UUIDs)")
+
+                # Combine both sources (UUIDs + numeric IDs)
+                df = pd.concat([df_capitan, df_master], ignore_index=True)
+                # Remove duplicates, keeping first (Capitan has more complete data)
+                df = df.drop_duplicates(subset=['customer_id'], keep='first')
+                print(f"✅ Combined: {len(df)} unique customers (both ID formats)")
+                return df
+
+            except Exception as e:
+                print(f"⚠️  Could not load customers_master.csv: {e}")
+                print(f"   Continuing with capitan/customers.csv only")
+                return df_capitan
+
         except Exception as e:
             print(f"⚠️  Error loading customers: {e}")
             return pd.DataFrame()
