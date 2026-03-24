@@ -86,12 +86,28 @@ def build_leads_table(days_back: int = 180) -> pd.DataFrame:
     df_transactions['Date'] = pd.to_datetime(df_transactions['Date'], errors='coerce')
     print(f"  Transactions: {len(df_transactions)}")
 
+    # Customer identifiers (UUID ↔ Capitan ID mapping)
+    obj = s3.get_object(Bucket=bucket, Key='customers/customer_identifiers.csv')
+    df_identifiers = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+    df_identifiers['capitan_id'] = df_identifiers['source_id'].str.replace('customer:', '', regex=False)
+    uuid_to_capitan = dict(zip(
+        df_identifiers['customer_id'].astype(str),
+        df_identifiers['capitan_id'].astype(str)
+    ))
+    print(f"  ID mappings (UUID→Capitan): {len(uuid_to_capitan)}")
+
     # Customer events (contains many event types already)
     obj = s3.get_object(Bucket=bucket, Key='customers/customer_events.csv')
     df_events = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
     df_events['event_date'] = pd.to_datetime(df_events['event_date'], format='mixed', utc=True, errors='coerce')
     df_events['event_date'] = df_events['event_date'].dt.tz_localize(None)
-    print(f"  Customer events: {len(df_events)}")
+    # Normalize UUIDs to Capitan IDs so all events use the same ID space
+    df_events['customer_id'] = df_events['customer_id'].astype(str)
+    df_events['customer_id'] = df_events['customer_id'].map(
+        lambda cid: uuid_to_capitan.get(cid, cid)
+    )
+    uuid_converted = df_events['customer_id'].str.contains('-', na=False).sum()
+    print(f"  Customer events: {len(df_events)} ({len(df_events) - uuid_converted} mapped to Capitan IDs, {uuid_converted} unmapped UUIDs)")
 
     # Reservations
     try:
