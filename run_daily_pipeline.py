@@ -365,7 +365,7 @@ def run_daily_pipeline():
     print("     - Triggers follow-up email journey")
     try:
         from data_pipeline.sync_birthday_party_attendees_to_klaviyo import sync_completed_party_attendees
-        results = sync_completed_party_attendees(days_back=2, dry_run=False)
+        results = sync_completed_party_attendees(days_back=7, dry_run=False)
         print(f"✅ Synced {results.get('synced', 0)} party attendees to Klaviyo\n")
     except Exception as e:
         print(f"❌ Error syncing party attendees: {e}\n")
@@ -376,7 +376,7 @@ def run_daily_pipeline():
     print("     - Triggers follow-up email journey")
     try:
         from data_pipeline.sync_birthday_party_hosts_to_klaviyo import sync_completed_party_hosts
-        results = sync_completed_party_hosts(days_back=2, dry_run=False)
+        results = sync_completed_party_hosts(days_back=7, dry_run=False)
         print(f"✅ Synced {results.get('synced', 0)} party hosts to Klaviyo\n")
     except Exception as e:
         print(f"❌ Error syncing party hosts: {e}\n")

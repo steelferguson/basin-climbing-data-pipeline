@@ -99,8 +99,13 @@ class ShopifyFlagSyncer:
             '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer list
             'has_youth': 'XJMJMS',  # Has Youth list
             # 'new_member': 'Y5vi7J',  # New Members list - DISABLED: flow not configured yet
-            # Note: birthday_party_host_completed is handled by sync_birthday_party_hosts_to_klaviyo.py
-            # since party hosts may not have events in our customer database
+            # Birthday: pre-party engagement flows
+            'birthday_party_host_one_week_out': 'SvaqcF',  # Birthday Party Booked - Host
+            'birthday_party_host_six_days_out': 'SvaqcF',  # Birthday Party Booked - Host
+            'birthday_party_attendee_one_week_out': 'RS9mA4',  # Birthday Party RSVP - Attendee
+            # Post-party flows also synced by dedicated scripts for broader reach
+            # (sync_birthday_party_hosts_to_klaviyo.py → UqafAY)
+            # (sync_birthday_party_attendees_to_klaviyo.py → VvigsY)
         }
 
         # Additional tags to add alongside the primary tag (for aliases/variations)
