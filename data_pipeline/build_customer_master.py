@@ -109,6 +109,25 @@ def build_customer_master() -> pd.DataFrame:
     print(f"  Base: {len(master)} customers")
 
     # =========================================================
+    # 2b. Flag potential duplicates (same email = likely same person)
+    # =========================================================
+    print("\n🔍 Checking for duplicates...")
+
+    email_dupes = master[
+        master['email'].notna() & (master['email'] != '')
+    ].groupby(master['email'].str.lower().str.strip()).filter(lambda x: len(x) > 1)
+
+    if not email_dupes.empty:
+        dupe_emails = email_dupes['email'].str.lower().str.strip().nunique()
+        print(f"  Potential duplicates (same email): {len(email_dupes)} records ({dupe_emails} emails)")
+        # Flag them but don't merge — that's a manual review task
+        dupe_email_set = set(email_dupes['email'].str.lower().str.strip())
+        master['is_potential_duplicate'] = master['email'].str.lower().str.strip().isin(dupe_email_set)
+    else:
+        master['is_potential_duplicate'] = False
+        print(f"  No duplicates found")
+
+    # =========================================================
     # 3. Add UUID mapping
     # =========================================================
     if not df_identifiers.empty:
@@ -167,6 +186,71 @@ def build_customer_master() -> pd.DataFrame:
     print(f"  Children with parent: {master['parent_customer_id'].notna().sum()}")
     print(f"  Using parent contact: {master['is_using_parent_contact'].sum()}")
     print(f"  Reachable (have contact_email): {master['contact_email'].notna().sum()}")
+
+    # =========================================================
+    # 4b. Enrich email from transactions (Square/Stripe/Shopify)
+    # =========================================================
+    print("\n📧 Enriching emails from transactions...")
+
+    enriched = 0
+    if not df_transactions.empty:
+        # Build name→email map from transactions
+        name_to_email = {}
+        for col in ['receipt_email', 'billing_email']:
+            for _, row in df_transactions.iterrows():
+                email = str(row.get(col, '')).lower().strip()
+                name = str(row.get('Name', '')).strip()
+                if email and email != 'nan' and name and name != 'nan' and name != 'Refund':
+                    name_to_email[name.lower()] = email
+
+        # For customers without email, try to match by name
+        for idx, row in master.iterrows():
+            if pd.notna(row['email']) and row['email'] != '':
+                continue
+            full_name = f"{row.get('first_name', '')} {row.get('last_name', '')}".strip().lower()
+            matched_email = name_to_email.get(full_name)
+            if matched_email:
+                master.at[idx, 'email'] = matched_email
+                # Update contact_email if not using parent
+                if pd.isna(row.get('contact_email')) or row.get('contact_email') == '':
+                    master.at[idx, 'contact_email'] = matched_email
+                    master.at[idx, 'is_using_parent_contact'] = False
+                enriched += 1
+
+    print(f"  Enriched {enriched} emails from transaction name matching")
+    print(f"  Reachable after enrichment: {master['contact_email'].notna().sum()}")
+
+    # =========================================================
+    # 4c. Youth-specific fields
+    # =========================================================
+    print("\n👶 Adding youth-specific fields...")
+
+    # has_youth: is this person a parent of a child in our system?
+    parent_ids = set(df_family['parent_customer_id']) if not df_family.empty else set()
+    master['has_youth'] = master['customer_id'].isin(parent_ids)
+
+    # child_customer_ids: list of children for parents
+    parent_to_children = defaultdict(list)
+    if not df_family.empty:
+        for _, row in df_family.iterrows():
+            parent_to_children[row['parent_customer_id']].append(row['child_customer_id'])
+
+    master['child_customer_ids'] = master['customer_id'].map(
+        lambda x: ', '.join(parent_to_children.get(x, [])) or None
+    )
+    master['child_count'] = master['customer_id'].map(lambda x: len(parent_to_children.get(x, [])))
+
+    # Family relationship source/confidence
+    child_confidence = {}
+    if not df_family.empty and 'confidence' in df_family.columns:
+        for _, row in df_family.iterrows():
+            child_confidence[row['child_customer_id']] = row.get('confidence', 'unknown')
+
+    master['family_link_confidence'] = master['customer_id'].map(child_confidence)
+
+    print(f"  Parents (has_youth): {master['has_youth'].sum()}")
+    print(f"  Children: {master['is_child'].sum()}")
+    print(f"  Avg children per parent: {master[master['has_youth']]['child_count'].mean():.1f}")
 
     # =========================================================
     # 5. Add membership data
