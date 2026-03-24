@@ -118,6 +118,32 @@ def build_leads_table(days_back: int = 180) -> pd.DataFrame:
         df_reservations = pd.DataFrame()
         print(f"  Reservations: not available")
 
+    # Birthday parties (hosts + attendees from Firebase/Firestore)
+    try:
+        obj = s3.get_object(Bucket=bucket, Key='birthday/parties.csv')
+        df_parties = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+        print(f"  Birthday parties: {len(df_parties)}")
+    except Exception:
+        df_parties = pd.DataFrame()
+        print(f"  Birthday parties: not available")
+
+    try:
+        obj = s3.get_object(Bucket=bucket, Key='birthday/rsvps.csv')
+        df_rsvps = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+        print(f"  Birthday RSVPs: {len(df_rsvps)}")
+    except Exception:
+        df_rsvps = pd.DataFrame()
+        print(f"  Birthday RSVPs: not available")
+
+    # Klaviyo lead timeline events (dedicated file, not in customer_events)
+    try:
+        obj = s3.get_object(Bucket=bucket, Key='klaviyo/lead_timeline_events.csv')
+        df_klaviyo_events = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+        print(f"  Klaviyo lead events: {len(df_klaviyo_events)}")
+    except Exception:
+        df_klaviyo_events = pd.DataFrame()
+        print(f"  Klaviyo lead events: not available")
+
     # Crew interactions (if available)
     try:
         obj = s3.get_object(Bucket=bucket, Key='crew/interactions.csv')
@@ -307,15 +333,120 @@ def build_leads_table(days_back: int = 180) -> pd.DataFrame:
 
     print(f"  Crew interaction events: {crew_count}")
 
+    # Source F: Klaviyo lead timeline events (from dedicated S3 file)
+    klaviyo_count = 0
+    if not df_klaviyo_events.empty:
+        for _, row in df_klaviyo_events.iterrows():
+            cid = str(row.get('customer_id', ''))
+            if not cid or cid == 'nan':
+                continue
+            dt_str = row.get('event_date', '')
+            if not dt_str or dt_str == 'nan':
+                continue
+            dt = pd.to_datetime(dt_str, errors='coerce', utc=True)
+            if pd.isna(dt):
+                continue
+            dt = dt.tz_localize(None) if dt.tzinfo else dt
+            if dt < cutoff:
+                continue
+            timelines[cid].append({
+                'date': dt.strftime('%Y-%m-%d %H:%M'),
+                'type': row.get('event_type', 'klaviyo_email_received'),
+                'details': str(row.get('event_details', ''))[:200],
+                'source': 'klaviyo',
+            })
+            klaviyo_count += 1
+
+    print(f"  Klaviyo timeline events: {klaviyo_count}")
+
+    # Source G: Birthday parties (hosts and attendees from Firebase)
+    birthday_count = 0
+    # Hosts: match by email to customer_id
+    if not df_parties.empty:
+        for _, row in df_parties.iterrows():
+            email = str(row.get('host_email', '')).lower().strip()
+            cid = email_to_cid.get(email)
+            if not cid:
+                continue
+            party_date = row.get('party_date', '')
+            child_name = row.get('child_name', '')
+            timelines[cid].append({
+                'date': str(party_date),
+                'type': 'birthday_party_host',
+                'details': f"Birthday party host for {child_name}",
+                'source': 'firebase',
+            })
+            birthday_count += 1
+
+    # Attendees: match by email to customer_id
+    if not df_rsvps.empty:
+        # Join with parties to get party_date
+        if not df_parties.empty:
+            rsvp_with_date = df_rsvps.merge(
+                df_parties[['party_id', 'party_date', 'child_name']],
+                on='party_id', how='left'
+            )
+        else:
+            rsvp_with_date = df_rsvps.copy()
+
+        for _, row in rsvp_with_date.iterrows():
+            if row.get('attending') != 'yes':
+                continue
+            email = str(row.get('email', '')).lower().strip()
+            cid = email_to_cid.get(email)
+            if not cid:
+                continue
+            party_date = row.get('party_date', '')
+            child_name = row.get('child_name', '')
+            timelines[cid].append({
+                'date': str(party_date),
+                'type': 'birthday_party_attendee',
+                'details': f"Birthday party attendee ({child_name}'s party)",
+                'source': 'firebase',
+            })
+            birthday_count += 1
+
+    print(f"  Birthday party events: {birthday_count}")
+
     # =========================================================
     # 4. Build leads rows
     # =========================================================
     print(f"\n🏗️  Building leads from {len(timelines)} customers with events...")
 
+    # Event types that indicate someone was a lead (not just a member)
+    LEAD_ACTIVITY_TYPES = {
+        'Day Pass', 'day_pass_purchase', 'day_pass_purchased_no_checkin',
+        'shopify_purchase', 'programming_purchase', 'Event Booking', 'event_booking',
+        'camp_signup', 'fitness_class_signup', 'climbing_class_signup',
+        'youth_program_signup', 'competition_signup', 'event_signup',
+        'birthday_party_host', 'birthday_party_attendee',
+    }
+    LEAD_ENTRY_METHODS = {'ENT', 'GUE', 'FRE', 'EVE'}
+
     leads = []
+    skipped_members = 0
     for cid, events in timelines.items():
         if not events:
             continue
+
+        # Check if this person ever had lead-type activity
+        has_lead_activity = False
+        for e in events:
+            if e.get('type') in LEAD_ACTIVITY_TYPES:
+                has_lead_activity = True
+                break
+            if e.get('type') == 'checkin' and e.get('entry_method') in LEAD_ENTRY_METHODS:
+                has_lead_activity = True
+                break
+
+        # Skip if no lead activity (pure members who came in as members)
+        if not has_lead_activity:
+            skipped_members += 1
+            continue
+
+        # Include active members who had a lead phase — they show in
+        # historical charts as leads at the time they first visited.
+        # The dashboard filters by current status for follow-up lists.
 
         # Sort timeline chronologically
         events.sort(key=lambda e: e.get('date', ''))
@@ -330,12 +461,13 @@ def build_leads_table(days_back: int = 180) -> pd.DataFrame:
         email = info.get('email') or parent_info.get('email')
         phone = info.get('phone') or parent_info.get('phone')
 
-        # Timeline stats
+        # Timeline stats (only use past dates for first/last activity)
+        now = pd.Timestamp.now()
         dates = [pd.to_datetime(e['date'], errors='coerce') for e in events]
-        valid_dates = [d for d in dates if pd.notna(d)]
-        first_date = min(valid_dates) if valid_dates else None
-        last_date = max(valid_dates) if valid_dates else None
-        days_since = (pd.Timestamp.now() - last_date).days if last_date else None
+        past_dates = [d for d in dates if pd.notna(d) and d <= now]
+        first_date = min(past_dates) if past_dates else None
+        last_date = max(past_dates) if past_dates else None
+        days_since = (now - last_date).days if last_date else None
 
         # Visit count (checkins only)
         total_visits = sum(1 for e in events if e['type'] == 'checkin')
@@ -346,9 +478,112 @@ def build_leads_table(days_back: int = 180) -> pd.DataFrame:
         # Spend
         total_spend = sum(e.get('amount', 0) for e in events if 'amount' in e)
 
-        # Lead source (first non-checkin event type, or first event)
-        first_event = events[0]
-        lead_source = first_event['type']
+        # Lead source = how this person first came to Basin as a non-member.
+        # Only real acquisition channels count. Internal events (flags,
+        # klaviyo, crew contacts, membership_started) are NOT sources.
+        lead_source = None
+        for e in events:
+            etype = e.get('type', '')
+            details_lower = str(e.get('details', '')).lower()
+
+            # Skip internal/outreach events — these aren't how someone found Basin
+            if etype in ('flag_set', 'klaviyo_email_received', 'klaviyo_email_opened',
+                         'klaviyo_email_clicked', 'klaviyo_sms_received',
+                         'crew_contact', 'crew_sms', 'membership_started',
+                         'membership_renewal'):
+                continue
+
+            # Checkins — classify by entry method
+            if etype == 'checkin':
+                entry = e.get('entry_method', '')
+                if entry == 'ENT':
+                    lead_source = 'Day Pass'
+                    break
+                elif entry == 'GUE':
+                    lead_source = 'Guest Pass'
+                    break
+                elif entry == 'FRE':
+                    lead_source = 'Free Entry'
+                    break
+                elif entry == 'EVE':
+                    if 'birthday' in details_lower:
+                        lead_source = 'Birthday Party'
+                    elif 'camp' in details_lower:
+                        lead_source = 'Camp'
+                    elif 'homeschool' in details_lower or 'climb club' in details_lower or 'mini ascender' in details_lower:
+                        lead_source = 'Youth Program'
+                    elif 'hyrox' in details_lower or 'basin strong' in details_lower or 'basin fit' in details_lower or 'fitness' in details_lower:
+                        lead_source = 'Fitness Class'
+                    elif 'belay' in details_lower or 'intro to climbing' in details_lower or 'top rope' in details_lower:
+                        lead_source = 'Climbing Class'
+                    elif 'league' in details_lower or 'comp' in details_lower:
+                        lead_source = 'Competition'
+                    else:
+                        lead_source = 'Event'
+                    break
+                elif entry == 'MEM':
+                    continue  # Member checkin — not how they first came
+                else:
+                    lead_source = 'Day Pass'
+                    break
+
+            # Reservation signups
+            if etype == 'camp_signup':
+                lead_source = 'Camp'
+                break
+            if etype == 'fitness_class_signup':
+                lead_source = 'Fitness Class'
+                break
+            if etype == 'climbing_class_signup':
+                lead_source = 'Climbing Class'
+                break
+            if etype == 'youth_program_signup':
+                lead_source = 'Youth Program'
+                break
+            if etype == 'competition_signup':
+                lead_source = 'Competition'
+                break
+            if etype == 'event_signup':
+                lead_source = 'Event'
+                break
+
+            # Transaction categories
+            if etype == 'Day Pass':
+                lead_source = 'Day Pass'
+                break
+            if etype == 'shopify_purchase':
+                lead_source = 'Shopify'
+                break
+            if etype == 'programming_purchase':
+                # Parse the description to get specific program type
+                if 'camp' in details_lower:
+                    lead_source = 'Camp'
+                elif 'homeschool' in details_lower or 'climb club' in details_lower:
+                    lead_source = 'Youth Program'
+                elif 'fitness' in details_lower or 'hyrox' in details_lower:
+                    lead_source = 'Fitness Class'
+                else:
+                    lead_source = 'Programming'
+                break
+            if etype == 'Event Booking' or etype == 'event_booking':
+                if 'birthday' in details_lower:
+                    lead_source = 'Birthday Party'
+                else:
+                    lead_source = 'Event'
+                break
+            if etype == 'day_pass_purchased_no_checkin':
+                lead_source = 'Day Pass'
+                break
+            if etype in ('birthday_party_host', 'birthday_party_attendee'):
+                lead_source = 'Birthday Party'
+                break
+            if 'birthday' in details_lower:
+                lead_source = 'Birthday Party'
+                break
+
+        # Fallback — if we couldn't determine source, skip internal labels
+        if not lead_source:
+            lead_source = 'Other'
 
         # Conversion tracking
         has_membership = cid in active_member_ids
