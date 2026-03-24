@@ -378,20 +378,19 @@ class SecondVisitOfferEligibleFlag(FlagRule):
     """
     Flag customers eligible for half-price second visit offer.
 
-    ** AB TEST GROUP B (customer_id last digit 5-9) **
-
     Business logic:
-    - Customer is in Group B (customer_id last digit 5-9)
-    - Has at least one day pass purchase (recent)
+    - Has at least one day pass purchase (recent, within last 5 days)
     - Had NO day pass purchases in the 2 months BEFORE the recent one (returning after break)
     - NOT currently an active member
     - Hasn't been flagged for this offer in the last 180 days
+
+    This triggers a Shopify Flow that creates a unique discount code for the customer.
     """
 
     def __init__(self):
         super().__init__(
             flag_type="second_visit_offer_eligible",
-            description="[Group B] Customer eligible for half-price second visit offer (returning after 2+ month break)",
+            description="Customer eligible for half-price second visit offer (returning after 2+ month break)",
             priority="high"
         )
 
@@ -399,10 +398,8 @@ class SecondVisitOfferEligibleFlag(FlagRule):
         """
         Check if customer is eligible for second visit offer.
         """
-        # Criteria 0: Must be in Group B (email/phone hash last digit 5-9)
-        ab_group = get_customer_ab_group(customer_id, email=email, phone=phone)
-        if ab_group != "B":
-            return None  # Group A customers use different flag
+        # A/B TEST REMOVED (2026-03-23): All customers now eligible for this offer
+        # Previously only Group B (email/phone hash last digit 5-9) was eligible
 
         # Get all day pass events (from checkins or transactions)
         day_pass_events = [
@@ -504,14 +501,13 @@ class SecondVisitOfferEligibleFlag(FlagRule):
             'flag_type': self.flag_type,
             'triggered_date': today,
             'flag_data': {
-                'ab_group': 'B',
-                'experiment_id': 'day_pass_conversion_2026_02',
                 'most_recent_day_pass_date': most_recent_day_pass['event_date'].isoformat(),
                 'days_since_day_pass': (today - most_recent_day_pass['event_date']).days,
                 'total_day_passes': len(day_pass_events),
                 'days_since_previous_day_pass': days_since_previous_day_pass,
                 'returning_after_break': days_since_previous_day_pass is None or days_since_previous_day_pass >= 60,
-                'description': self.description
+                'description': self.description,
+                'flag_description': '50% off second visit day pass offer'
             },
             'priority': self.priority
         }
@@ -2003,10 +1999,9 @@ class HasYouthFlag(FlagRule):
 # List of all active rules
 ACTIVE_RULES = [
     ReadyForMembershipFlag(),
-    FirstTimeDayPass2WeekOfferFlag(),      # All customers: Direct 2-week offer (AB test removed 2026-03-23)
-    # AB TEST REMOVED (2026-03-23): Group B flags disabled - all customers now get direct 2-week offer
-    # SecondVisitOfferEligibleFlag(),        # Group B Step 1: 2nd pass offer (DISABLED)
-    # SecondVisit2WeekOfferFlag(),           # Group B Step 2: 2-week offer after return (DISABLED)
+    FirstTimeDayPass2WeekOfferFlag(),      # All customers: Direct 2-week offer
+    SecondVisitOfferEligibleFlag(),        # 50% off second visit - triggers Shopify Flow for discount code
+    # SecondVisit2WeekOfferFlag(),           # Group B Step 2: 2-week offer after return (DISABLED - part of old A/B test)
     TwoWeekPassUserFlag(),                 # Track 2-week pass usage
     BirthdayPartyHostOneWeekOutFlag(),     # Host has party in 7 days
     BirthdayPartyAttendeeOneWeekOutFlag(), # Attendee has party in 7 days
@@ -2062,7 +2057,7 @@ FLAG_REGISTRY = {
         'persistent': False,
     },
     'second_visit_offer_eligible': {
-        'description': '[Group B Step 1] Returning customer eligible for half-price second visit offer',
+        'description': 'Returning customer eligible for half-price second visit offer (triggers Shopify discount code)',
         'child_description': 'Your child visited — here is a deal on their next visit',
         'category': 'conversion',
         'child_eligible': True,

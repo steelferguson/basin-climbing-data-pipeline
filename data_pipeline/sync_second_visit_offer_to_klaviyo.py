@@ -4,10 +4,11 @@ Sync Second Visit 50% Off Offer to Klaviyo
 Adds day pass customers to the "Day Pass - Second Visit 50% Offer" list in Klaviyo.
 This triggers a flow that sends them a 50% off coupon for their next visit.
 
-Trigger criteria:
-- Customer has visited Basin (checked in with a day pass)
-- Not currently a member
-- Not already in the second visit offer list
+The discount code is created by a Shopify Flow when the customer gets the
+'second-visit-offer-eligible' tag. This script:
+1. Finds customers with the 'second_visit_offer_eligible' flag
+2. Looks up their Shopify discount code from metafield
+3. Syncs to Klaviyo with the discount code as a profile property
 
 Usage:
     python -m data_pipeline.sync_second_visit_offer_to_klaviyo
@@ -34,6 +35,9 @@ class SecondVisitOfferSync:
         if not self.klaviyo_key:
             raise ValueError("KLAVIYO_PRIVATE_KEY environment variable not set")
 
+        self.shopify_token = os.environ.get('SHOPIFY_ADMIN_TOKEN')
+        self.shopify_domain = os.environ.get('SHOPIFY_STORE_DOMAIN')
+
         self.s3_client = boto3.client(
             's3',
             aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
@@ -42,27 +46,76 @@ class SecondVisitOfferSync:
         )
         self.bucket_name = 'basin-climbing-data-prod'
 
+        # Cache for Shopify customer lookups
+        self._shopify_customer_cache = {}
+
+    def get_shopify_customer_by_email(self, email: str) -> dict:
+        """Look up Shopify customer by email and get their metafields."""
+        if email in self._shopify_customer_cache:
+            return self._shopify_customer_cache[email]
+
+        if not self.shopify_token or not self.shopify_domain:
+            return None
+
+        try:
+            # Search for customer by email
+            url = f"https://{self.shopify_domain}/admin/api/2024-01/customers/search.json?query=email:{email}"
+            response = requests.get(
+                url,
+                headers={"X-Shopify-Access-Token": self.shopify_token}
+            )
+
+            if response.status_code != 200:
+                return None
+
+            customers = response.json().get('customers', [])
+            if not customers:
+                return None
+
+            customer = customers[0]
+            customer_id = customer['id']
+
+            # Get metafields for this customer
+            metafields_url = f"https://{self.shopify_domain}/admin/api/2024-01/customers/{customer_id}/metafields.json"
+            mf_response = requests.get(
+                metafields_url,
+                headers={"X-Shopify-Access-Token": self.shopify_token}
+            )
+
+            if mf_response.status_code == 200:
+                metafields = mf_response.json().get('metafields', [])
+                customer['metafields'] = {mf['key']: mf['value'] for mf in metafields}
+            else:
+                customer['metafields'] = {}
+
+            self._shopify_customer_cache[email] = customer
+            time.sleep(0.2)  # Rate limiting
+            return customer
+
+        except Exception as e:
+            print(f"    Warning: Could not look up Shopify customer {email}: {e}")
+            return None
+
     def load_day_pass_customers(self) -> pd.DataFrame:
         """
-        Load customers who have used a day pass from S3.
+        Load customers with second_visit_offer_eligible flag from S3.
 
         Returns customers with:
-        - At least one day pass check-in
+        - second_visit_offer_eligible flag (triggers Shopify discount code)
         - Email address available
-        - Not currently a member
         """
         print("Loading customer data from S3...")
 
-        # Load customer flags (has first_time_day_pass_2wk_offer flag)
+        # Load customer flags
         obj = self.s3_client.get_object(
             Bucket=self.bucket_name,
             Key='customers/customer_flags.csv'
         )
         df_flags = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
 
-        # Get customers with day pass offer flag
-        day_pass_flags = df_flags[df_flags['flag_type'] == 'first_time_day_pass_2wk_offer']
-        print(f"  Found {len(day_pass_flags)} customers with day pass flag")
+        # Get customers with second visit offer flag
+        second_visit_flags = df_flags[df_flags['flag_type'] == 'second_visit_offer_eligible']
+        print(f"  Found {len(second_visit_flags)} customers with second_visit_offer_eligible flag")
 
         # Load customer contact info
         obj = self.s3_client.get_object(
@@ -72,7 +125,7 @@ class SecondVisitOfferSync:
         df_customers = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
 
         # Merge to get emails
-        df_merged = day_pass_flags.merge(
+        df_merged = second_visit_flags.merge(
             df_customers[['customer_id', 'primary_email', 'primary_phone', 'primary_name']],
             on='customer_id',
             how='left'
@@ -114,7 +167,7 @@ class SecondVisitOfferSync:
 
     def add_profiles_to_list(self, profiles: list, dry_run: bool = False) -> dict:
         """
-        Add profiles to the Klaviyo list.
+        Add profiles to the Klaviyo list with their Shopify discount codes.
 
         Args:
             profiles: List of dicts with email, first_name, last_name
@@ -124,11 +177,18 @@ class SecondVisitOfferSync:
             Dict with success/failure counts
         """
         if not profiles:
-            return {"added": 0, "failed": 0}
+            return {"added": 0, "failed": 0, "with_discount": 0}
 
         if dry_run:
+            # Still look up discount codes in dry run to show what would happen
+            with_discount = 0
+            for profile in profiles[:5]:  # Check first 5 for preview
+                shopify_customer = self.get_shopify_customer_by_email(profile['email'])
+                if shopify_customer and shopify_customer.get('metafields', {}).get('day_pass_discount_code'):
+                    with_discount += 1
             print(f"  DRY RUN: Would add {len(profiles)} profiles to list")
-            return {"added": len(profiles), "failed": 0, "dry_run": True}
+            print(f"  DRY RUN: Sample check - {with_discount}/5 have Shopify discount codes")
+            return {"added": len(profiles), "failed": 0, "with_discount": "N/A", "dry_run": True}
 
         url = f"https://a.klaviyo.com/api/lists/{KLAVIYO_LIST_ID}/relationships/profiles/"
         headers = {
@@ -139,6 +199,7 @@ class SecondVisitOfferSync:
 
         added = 0
         failed = 0
+        with_discount = 0
 
         # Process in batches of 100
         batch_size = 100
@@ -147,6 +208,29 @@ class SecondVisitOfferSync:
 
             # First, upsert profiles to ensure they exist
             for profile in batch:
+                # Look up Shopify discount code
+                discount_code = None
+                discount_link = None
+                shopify_customer = self.get_shopify_customer_by_email(profile['email'])
+                if shopify_customer:
+                    metafields = shopify_customer.get('metafields', {})
+                    discount_code = metafields.get('day_pass_discount_code')
+                    discount_link = metafields.get('day_pass_discount_link')
+                    if discount_code:
+                        with_discount += 1
+
+                profile_properties = {
+                    "day_pass_customer": True,
+                    "second_visit_offer_eligible": True,
+                    "offer_date": datetime.now().isoformat()
+                }
+
+                # Add discount code if available
+                if discount_code:
+                    profile_properties["day_pass_discount_code"] = discount_code
+                if discount_link:
+                    profile_properties["day_pass_discount_link"] = discount_link
+
                 profile_data = {
                     "data": {
                         "type": "profile",
@@ -154,11 +238,7 @@ class SecondVisitOfferSync:
                             "email": profile['email'],
                             "first_name": profile.get('first_name', ''),
                             "last_name": profile.get('last_name', ''),
-                            "properties": {
-                                "day_pass_customer": True,
-                                "second_visit_offer_eligible": True,
-                                "offer_date": datetime.now().isoformat()
-                            }
+                            "properties": profile_properties
                         }
                     }
                 }
@@ -201,14 +281,14 @@ class SecondVisitOfferSync:
 
                 if add_response.status_code in [200, 201, 204]:
                     added += len(profile_ids)
-                    print(f"    Added batch of {len(profile_ids)} profiles")
+                    print(f"    Added batch of {len(profile_ids)} profiles ({with_discount} with discount codes)")
                 else:
                     failed += len(profile_ids)
                     print(f"    Failed to add batch: {add_response.status_code}")
 
             time.sleep(0.5)  # Rate limiting between batches
 
-        return {"added": added, "failed": failed}
+        return {"added": added, "failed": failed, "with_discount": with_discount}
 
     def sync(self, dry_run: bool = False, limit: int = None):
         """
@@ -269,6 +349,7 @@ class SecondVisitOfferSync:
         print(f"\n{'='*60}")
         print(f"SYNC COMPLETE")
         print(f"  Added: {result['added']}")
+        print(f"  With discount code: {result.get('with_discount', 'N/A')}")
         print(f"  Failed: {result['failed']}")
         print(f"{'='*60}\n")
 
