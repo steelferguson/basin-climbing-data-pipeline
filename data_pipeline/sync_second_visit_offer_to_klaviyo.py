@@ -290,6 +290,77 @@ class SecondVisitOfferSync:
 
         return {"added": added, "failed": failed, "with_discount": with_discount}
 
+    def update_existing_members_with_discount_codes(self, emails: list, dry_run: bool = False) -> dict:
+        """
+        Update existing list members with their Shopify discount codes.
+
+        Args:
+            emails: List of email addresses to update
+            dry_run: If True, don't actually update
+
+        Returns:
+            Dict with update counts
+        """
+        if not emails:
+            return {"updated": 0, "with_discount": 0}
+
+        headers = {
+            "Authorization": f"Klaviyo-API-Key {self.klaviyo_key}",
+            "revision": "2024-10-15",
+            "Content-Type": "application/json"
+        }
+
+        updated = 0
+        with_discount = 0
+
+        for email in emails:
+            # Look up Shopify discount code
+            shopify_customer = self.get_shopify_customer_by_email(email)
+            if not shopify_customer:
+                continue
+
+            metafields = shopify_customer.get('metafields', {})
+            discount_code = metafields.get('day_pass_discount_code')
+            discount_link = metafields.get('day_pass_discount_link')
+
+            if not discount_code:
+                continue
+
+            with_discount += 1
+
+            if dry_run:
+                continue
+
+            # Update profile with discount code
+            profile_data = {
+                "data": {
+                    "type": "profile",
+                    "attributes": {
+                        "email": email,
+                        "properties": {
+                            "day_pass_discount_code": discount_code,
+                            "day_pass_discount_link": discount_link,
+                            "discount_code_synced_at": datetime.now().isoformat()
+                        }
+                    }
+                }
+            }
+
+            response = requests.post(
+                "https://a.klaviyo.com/api/profile-import/",
+                headers=headers,
+                json=profile_data
+            )
+
+            if response.status_code in [200, 201, 202]:
+                updated += 1
+            else:
+                print(f"    Warning: Failed to update {email}: {response.status_code}")
+
+            time.sleep(0.2)  # Rate limiting
+
+        return {"updated": updated, "with_discount": with_discount}
+
     def sync(self, dry_run: bool = False, limit: int = None):
         """
         Main sync function.
@@ -315,7 +386,25 @@ class SecondVisitOfferSync:
         # Get existing list members
         existing_emails = self.get_existing_list_members()
 
-        # Filter out existing members
+        # Get emails of customers with the flag
+        all_flag_emails = df_customers['primary_email'].str.lower().tolist()
+
+        # Find existing members who need discount code updates
+        existing_to_update = [e for e in existing_emails if e in all_flag_emails]
+        print(f"{len(existing_to_update)} existing members to update with discount codes")
+
+        # Update existing members with discount codes
+        if existing_to_update:
+            print(f"\nUpdating existing members with discount codes...")
+            update_result = self.update_existing_members_with_discount_codes(
+                existing_to_update, dry_run=dry_run
+            )
+            if dry_run:
+                print(f"  DRY RUN: Would update {update_result['with_discount']} members with discount codes")
+            else:
+                print(f"  Updated {update_result['updated']} members ({update_result['with_discount']} had discount codes)")
+
+        # Filter out existing members for new additions
         new_customers = df_customers[
             ~df_customers['primary_email'].str.lower().isin(existing_emails)
         ]
@@ -323,6 +412,9 @@ class SecondVisitOfferSync:
 
         if len(new_customers) == 0:
             print("No new customers to add")
+            print(f"\n{'='*60}")
+            print(f"SYNC COMPLETE")
+            print(f"{'='*60}\n")
             return
 
         # Apply limit if specified
