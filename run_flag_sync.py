@@ -7,6 +7,7 @@ Runs customer flag evaluation and syncs to marketing platforms:
 3. Syncs flags to Mailchimp for email campaigns
 4. Syncs birthday party hosts to Klaviyo (triggers post-party follow-up flow)
 5. Syncs birthday party attendees to Klaviyo (triggers attendee follow-up flow)
+6. Syncs day pass customers to Klaviyo for 50% off second visit offer
 
 This is separated from data ingestion to allow faster iteration during testing.
 
@@ -107,6 +108,18 @@ def run_flag_sync():
                 print(result.stderr, flush=True)
     except Exception as e:
         print(f"❌ Error syncing birthday party attendees: {e}\n", flush=True)
+        import traceback
+        traceback.print_exc()
+
+    # 6. Sync day pass customers to Klaviyo for 50% off second visit offer
+    print("6. Syncing day pass customers for 50% off second visit offer...", flush=True)
+    try:
+        from data_pipeline.sync_second_visit_offer_to_klaviyo import SecondVisitOfferSync
+        second_visit_syncer = SecondVisitOfferSync()
+        second_visit_syncer.sync(dry_run=False)
+        print("✅ Second visit offer synced to Klaviyo successfully\n", flush=True)
+    except Exception as e:
+        print(f"❌ Error syncing second visit offer: {e}\n", flush=True)
         import traceback
         traceback.print_exc()
 
