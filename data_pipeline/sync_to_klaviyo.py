@@ -290,7 +290,11 @@ class KlaviyoSync:
 
         # Load customer data
         print("\nLoading customer data from S3...")
-        df_customers = self._load_s3_csv('customers/customers_master.csv')
+        # Try unified customer master v2 first, fall back to old
+        df_customers = self._load_s3_csv('customers/customer_master_v2.csv')
+        if df_customers.empty:
+            print("   customer_master_v2 not found, falling back to old customers_master.csv")
+            df_customers = self._load_s3_csv('customers/customers_master.csv')
         df_flags = self._load_s3_csv('customers/customer_flags.csv')
         df_memberships = self._load_s3_csv('capitan/memberships.csv')
 
@@ -346,8 +350,8 @@ class KlaviyoSync:
         print(f"\nSyncing {len(df_customers)} profiles to Klaviyo...")
 
         for idx, row in df_customers.iterrows():
-            email = row.get('primary_email', row.get('email', ''))
-            phone = row.get('primary_phone', row.get('phone', ''))
+            email = row.get('contact_email', row.get('primary_email', row.get('email', '')))
+            phone = row.get('contact_phone', row.get('primary_phone', row.get('phone', '')))
 
             # Skip if no contact info
             if pd.isna(email) and pd.isna(phone):
@@ -495,10 +499,13 @@ class KlaviyoSync:
         print(f"   Found {len(df_events)} events to sync")
 
         # Load customer master to get emails
-        df_customers = self._load_s3_csv('customers/customers_master.csv')
+        df_customers = self._load_s3_csv('customers/customer_master_v2.csv')
+        if df_customers.empty:
+            df_customers = self._load_s3_csv('customers/customers_master.csv')
+        email_col = 'contact_email' if 'contact_email' in df_customers.columns else 'primary_email'
         customer_emails = dict(zip(
             df_customers['customer_id'].astype(str),
-            df_customers['primary_email']
+            df_customers[email_col]
         ))
 
         synced = 0

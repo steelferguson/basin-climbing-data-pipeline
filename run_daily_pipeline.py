@@ -246,11 +246,55 @@ def run_daily_pipeline():
         print(f"❌ Error building flag-email verification report: {e}\n")
 
     # 9e. DISABLED - Mailchimp import CSV (now using automated Klaviyo sync via flag_sync.yml)
-    # print("11e. Sending Mailchimp import CSV for 2-week pass journey...")
-    # The Klaviyo day pass journey is now automated via sync_flags_to_shopify.py
-    # which adds customers to Klaviyo lists when flags are generated.
-    # See: .github/workflows/flag_sync.yml
     print("11e. Skipping Mailchimp CSV (using automated Klaviyo sync)\n")
+
+    # 9f. Build unified customer master (v2)
+    print("11f. Building unified customer master...")
+    print("    (Combines Capitan, family graph, memberships, checkins, Klaviyo, crew)")
+    try:
+        from data_pipeline.build_customer_master import upload_customer_master
+        df_cm = upload_customer_master(save_local=False)
+        print(f"✅ Customer master v2: {len(df_cm)} customers\n")
+    except Exception as e:
+        print(f"❌ Error building customer master: {e}\n")
+
+    # 9g. Sync Klaviyo flow events to dedicated file
+    print("11g. Syncing Klaviyo flow events...")
+    try:
+        from data_pipeline.sync_klaviyo_flow_events import KlaviyoFlowEventSyncer
+        syncer = KlaviyoFlowEventSyncer()
+        flow_events = syncer.fetch_all_flow_events(days_back=30)
+        new_events = syncer.convert_to_customer_events(flow_events)
+        if new_events:
+            import json as json_lib
+            df_kl = pd.DataFrame(new_events)
+            from data_pipeline.upload_data import DataUploader
+            uploader_kl = DataUploader()
+            uploader_kl.upload_to_s3(df_kl, 'basin-climbing-data-prod', 'klaviyo/lead_timeline_events.csv')
+            print(f"✅ Synced {len(new_events)} Klaviyo events\n")
+        else:
+            print("✅ No new Klaviyo events\n")
+    except Exception as e:
+        print(f"❌ Error syncing Klaviyo events: {e}\n")
+
+    # 9h. Fetch crew interactions from Supabase
+    print("11h. Fetching crew interactions from Supabase...")
+    try:
+        from data_pipeline.fetch_crew_interactions import CrewInteractionFetcher
+        crew_fetcher = CrewInteractionFetcher()
+        crew_fetcher.run(days_back=90)
+        print(f"✅ Crew interactions updated\n")
+    except Exception as e:
+        print(f"❌ Error fetching crew interactions: {e}\n")
+
+    # 9i. Build leads table
+    print("11i. Building leads table...")
+    try:
+        from data_pipeline.build_leads_table import upload_leads_table
+        df_leads = upload_leads_table(days_back=730, save_local=False)
+        print(f"✅ Leads table: {len(df_leads)} leads\n")
+    except Exception as e:
+        print(f"❌ Error building leads table: {e}\n")
 
     # 10. Generate team membership reconciliation report
     print("12. Generating team membership reconciliation report...")
