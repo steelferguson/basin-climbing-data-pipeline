@@ -258,6 +258,15 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error building customer master: {e}\n")
 
+    # 9f2. Build customer transaction mapping (for CRM)
+    print("11f2. Building customer transaction mapping...")
+    try:
+        from data_pipeline.build_customer_transactions import upload_customer_transactions
+        df_ct = upload_customer_transactions(save_local=False)
+        print(f"✅ Customer transactions: {len(df_ct)} linked\n")
+    except Exception as e:
+        print(f"❌ Error building customer transactions: {e}\n")
+
     # 9g. Sync Klaviyo flow events to dedicated file
     print("11g. Syncing Klaviyo flow events...")
     try:
