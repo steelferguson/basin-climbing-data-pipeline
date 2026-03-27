@@ -714,23 +714,72 @@ class ShopifyFlagSyncer:
         customer_master_v2.csv has all customers with contact_email/contact_phone
         pre-computed (includes parent fallback for children).
 
+        Also loads customer_identifiers.csv to map UUID customer_ids to contact info,
+        since flags use UUIDs but customer_master_v2 uses Capitan numeric IDs.
+
         Returns:
             DataFrame with customer_id, email, phone, first_name, last_name
+            Includes BOTH Capitan IDs and UUID mappings for compatibility.
         """
         try:
+            # Load customer master (has Capitan IDs and contact info)
             obj = self.s3_client.get_object(
                 Bucket=self.bucket_name,
                 Key="customers/customer_master_v2.csv"
             )
-            df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
-            df['customer_id'] = df['customer_id'].astype(str)
-            # Use contact_email/phone (includes parent fallback for children)
-            df['email'] = df['contact_email']
-            df['phone'] = df['contact_phone']
-            df = df[['customer_id', 'email', 'phone', 'first_name', 'last_name']].copy()
-            print(f"✅ Loaded {len(df)} customers from customer_master_v2.csv")
-            print(f"   With email: {df['email'].notna().sum()}, With phone: {df['phone'].notna().sum()}")
-            return df
+            df_master = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            df_master['customer_id'] = df_master['customer_id'].astype(str)
+            df_master['email'] = df_master['contact_email']
+            df_master['phone'] = df_master['contact_phone']
+            df_master = df_master[['customer_id', 'email', 'phone', 'first_name', 'last_name']].copy()
+
+            print(f"✅ Loaded {len(df_master)} customers from customer_master_v2.csv")
+            print(f"   With email: {df_master['email'].notna().sum()}, With phone: {df_master['phone'].notna().sum()}")
+
+            # Load customer identifiers (maps Capitan IDs to UUIDs)
+            try:
+                obj = self.s3_client.get_object(
+                    Bucket=self.bucket_name,
+                    Key="customers/customer_identifiers.csv"
+                )
+                df_idents = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+
+                # Filter to capitan source and extract capitan_id
+                df_capitan_idents = df_idents[df_idents['source'] == 'capitan'].copy()
+                df_capitan_idents['capitan_id'] = df_capitan_idents['source_id'].str.replace('customer:', '', regex=False)
+                df_capitan_idents = df_capitan_idents[['customer_id', 'capitan_id']].copy()
+                df_capitan_idents['capitan_id'] = df_capitan_idents['capitan_id'].astype(str)
+
+                # Create UUID-based customer records by merging
+                # This maps UUID -> Capitan ID -> contact info
+                df_uuid_customers = df_capitan_idents.merge(
+                    df_master,
+                    left_on='capitan_id',
+                    right_on='customer_id',
+                    how='inner',
+                    suffixes=('_uuid', '_capitan')
+                )
+
+                # Keep UUID as the customer_id, drop the capitan_id columns
+                df_uuid_customers = df_uuid_customers.rename(columns={'customer_id_uuid': 'customer_id'})
+                df_uuid_customers = df_uuid_customers[['customer_id', 'email', 'phone', 'first_name', 'last_name']].copy()
+
+                print(f"✅ Created {len(df_uuid_customers)} UUID-mapped customer records")
+
+                # Combine both: Capitan IDs (original) + UUID mappings
+                # This ensures we can match flags using either ID format
+                df_combined = pd.concat([df_master, df_uuid_customers], ignore_index=True)
+                df_combined = df_combined.drop_duplicates(subset=['customer_id'], keep='first')
+
+                print(f"✅ Combined total: {len(df_combined)} customer records (Capitan + UUID)")
+                print(f"   With email: {df_combined['email'].notna().sum()}, With phone: {df_combined['phone'].notna().sum()}")
+
+                return df_combined
+
+            except Exception as e:
+                print(f"⚠️  Could not load customer_identifiers.csv: {e}")
+                print("   Continuing with Capitan IDs only (UUID-based flags may not sync)")
+                return df_master
 
         except Exception as e:
             print(f"⚠️  Could not load customer_master_v2.csv, falling back to old method: {e}")
