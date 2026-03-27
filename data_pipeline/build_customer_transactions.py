@@ -61,9 +61,39 @@ def build_customer_transactions() -> pd.DataFrame:
             email_to_cid[contact] = str(row['customer_id'])
     print(f"Email→customer mappings: {len(email_to_cid)}")
 
+    # Load entry pass → owner_id from Capitan API
+    pass_to_owner = {}
+    try:
+        import requests as req
+        import time
+        capitan_token = os.getenv('CAPITAN_API_TOKEN')
+        if capitan_token:
+            cap_headers = {'Authorization': f'token {capitan_token}'}
+            page = 1
+            while True:
+                resp = req.get(
+                    'https://api.hellocapitan.com/api/customer-entry-passes/',
+                    headers=cap_headers,
+                    params={'page': page, 'page_size': 1000},
+                    timeout=30
+                )
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                for p in data.get('results', []):
+                    pass_to_owner[str(p['id'])] = str(p['owner_id'])
+                if not data.get('next'):
+                    break
+                page += 1
+                time.sleep(0.11)
+            print(f"Entry pass→owner mappings: {len(pass_to_owner)}")
+    except Exception as e:
+        print(f"Could not load entry passes: {e}")
+
     # Match each transaction to a customer_id
     results = []
     matched_mem = 0
+    matched_entry = 0
     matched_email = 0
     unmatched = 0
 
@@ -82,7 +112,18 @@ def build_customer_transactions() -> pd.DataFrame:
                 match_method = 'membership_id'
                 matched_mem += 1
 
-        # Method 2: Email match
+        # Method 2: Entry pass ID in description → owner_id
+        if not customer_id:
+            entry_match = re.search(r'entry pass #(\d+)', desc, re.IGNORECASE)
+            if entry_match:
+                pass_id = entry_match.group(1)
+                owner = pass_to_owner.get(pass_id)
+                if owner:
+                    customer_id = owner
+                    match_method = 'entry_pass_id'
+                    matched_entry += 1
+
+        # Method 3: Email match
         if not customer_id:
             email = str(row.get('receipt_email') or row.get('billing_email') or '').lower().strip()
             if email and email != 'nan':
@@ -111,6 +152,7 @@ def build_customer_transactions() -> pd.DataFrame:
 
     print(f"\nMatched: {len(df_result)} transactions")
     print(f"  Via membership ID: {matched_mem}")
+    print(f"  Via entry pass ID: {matched_entry}")
     print(f"  Via email: {matched_email}")
     print(f"  Unmatched: {unmatched}")
     print(f"  Coverage: {len(df_result)/len(df)*100:.0f}%")

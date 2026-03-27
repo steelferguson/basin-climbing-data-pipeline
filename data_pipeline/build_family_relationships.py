@@ -290,8 +290,7 @@ def build_family_relationships(
             if child_last in adults_by_last_name.groups:
                 matching_adults = adults_by_last_name.get_group(child_last)
 
-                # If exactly one adult matches, high-ish confidence
-                # If multiple adults match, pick the one with active membership or most check-ins
+                # If exactly one adult matches, good confidence
                 if len(matching_adults) == 1:
                     parent = matching_adults.iloc[0]
                     family_links.append({
@@ -302,19 +301,28 @@ def build_family_relationships(
                         'source': 'last_name_match'
                     })
                     fuzzy_links += 1
-                elif len(matching_adults) <= 5:
-                    # Multiple adults with same last name — pick one with active membership
+                elif len(matching_adults) <= 10:
+                    # Multiple adults with same last name — tiebreakers:
+                    # 1. Active membership
+                    # 2. Has check-ins (most visits)
                     active = matching_adults[matching_adults.get('has_active_membership', pd.Series(False)) == True]
                     if len(active) == 1:
                         parent = active.iloc[0]
-                        family_links.append({
-                            'parent_customer_id': parent['customer_id'],
-                            'child_customer_id': child['customer_id'],
-                            'relationship_type': 'parent_child',
-                            'confidence': 'low',
-                            'source': 'last_name_match_active_member'
-                        })
-                        fuzzy_links += 1
+                        source = 'last_name_match_active_member'
+                    elif len(active) > 1:
+                        # Multiple active members with same name — skip (ambiguous)
+                        continue
+                    else:
+                        # No active member — skip (too ambiguous without membership signal)
+                        continue
+                    family_links.append({
+                        'parent_customer_id': parent['customer_id'],
+                        'child_customer_id': child['customer_id'],
+                        'relationship_type': 'parent_child',
+                        'confidence': 'low',
+                        'source': source
+                    })
+                    fuzzy_links += 1
 
         print(f"   ✅ Found {fuzzy_links} parent-child links from last name matching")
         print(f"   (from {len(unlinked_minors)} unlinked minors without email)")
