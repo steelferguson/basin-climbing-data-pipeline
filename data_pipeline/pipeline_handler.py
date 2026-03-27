@@ -729,9 +729,17 @@ def upload_capitan_relations_and_family_graph(save_local=False):
         print(f"⚠️  Could not fetch reservations: {e}")
         reservations_df = pd.DataFrame()
 
+    # Load checkins for shared-checkin family matching
+    try:
+        csv_checkins = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_capitan_checkins)
+        checkins_df = uploader.convert_csv_to_df(csv_checkins)
+        print(f"✅ Loaded {len(checkins_df)} checkins for family matching")
+    except Exception:
+        checkins_df = pd.DataFrame()
+
     # Build family relationship graph
     print(f"\nBuilding family relationship graph...")
-    family_df = build_family_relationships(relations_df, memberships_raw, customers_df, reservations_df)
+    family_df = build_family_relationships(relations_df, memberships_raw, customers_df, reservations_df, checkins_df)
 
     # Save locally if requested
     if save_local:

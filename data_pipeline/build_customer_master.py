@@ -82,8 +82,31 @@ def build_customer_master() -> pd.DataFrame:
     df_klaviyo = load_s3('klaviyo/lead_timeline_events.csv')
     print(f"  Klaviyo events: {len(df_klaviyo)}")
 
-    df_crew = load_s3('crew/interactions.csv')
-    print(f"  Crew interactions: {len(df_crew)}")
+    # Crew interactions: try Supabase direct (real-time), fall back to S3 snapshot
+    df_crew = pd.DataFrame()
+    try:
+        import requests
+        supabase_url = os.getenv('SUPABASE_URL')
+        supabase_key = os.getenv('SUPABASE_SERVICE_KEY')
+        if supabase_url and supabase_key:
+            headers = {
+                'apikey': supabase_key,
+                'Authorization': f'Bearer {supabase_key}',
+            }
+            resp = requests.get(
+                f"{supabase_url}/rest/v1/crew_interactions?select=*&order=created_at.desc",
+                headers=headers, timeout=15
+            )
+            if resp.status_code == 200 and resp.json():
+                df_crew = pd.DataFrame(resp.json())
+                print(f"  Crew interactions: {len(df_crew)} (from Supabase, real-time)")
+            else:
+                raise Exception(f"Supabase returned {resp.status_code}")
+        else:
+            raise Exception("No Supabase credentials")
+    except Exception as e:
+        df_crew = load_s3('crew/interactions.csv')
+        print(f"  Crew interactions: {len(df_crew)} (from S3 fallback: {e})")
 
     df_reservations = load_s3('capitan/reservations.csv')
     print(f"  Reservations: {len(df_reservations)}")
@@ -389,8 +412,12 @@ def build_customer_master() -> pd.DataFrame:
     master['lead_source'] = master['customer_id'].map(lead_source_map)
 
     # is_lead: has lead activity AND not currently an active member
+    # ALSO: lapsed members are leads (they cancelled, they're potential re-conversions)
     has_lead_activity = master['customer_id'].isin(lead_source_map.keys())
-    master['is_lead'] = has_lead_activity & ~master['has_active_membership']
+    master['is_lead'] = (has_lead_activity | master['is_lapsed_member']) & ~master['has_active_membership']
+
+    # Set lead_source for lapsed members who don't have one
+    master.loc[master['is_lapsed_member'] & master['lead_source'].isna(), 'lead_source'] = 'Lapsed Member'
 
     print(f"  Leads (non-member with activity): {master['is_lead'].sum()}")
     print(f"  Lead sources:")

@@ -34,6 +34,7 @@ def build_family_relationships(
     memberships_raw: list,  # Raw membership JSON with all_customers
     customers_df: pd.DataFrame,
     reservations_df: pd.DataFrame = None,
+    checkins_df: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Build comprehensive family relationship graph.
@@ -321,9 +322,82 @@ def build_family_relationships(
         print("   ⚠️  No unlinked minors to match")
 
     # =================================================================
+    # SOURCE 6: Shared Checkin Matching (low confidence)
+    # If a child and adult check in within 5 minutes of each other
+    # on the same day, and the child has no existing parent link,
+    # link them. Strong behavioral signal — parent brought the kid.
+    # =================================================================
+    print("\n6. Processing shared checkin matches...")
+
+    checkin_links = 0
+    already_linked = set(link['child_customer_id'] for link in family_links)
+
+    if checkins_df is not None and not checkins_df.empty:
+        checkins_df = checkins_df.copy()
+        checkins_df['checkin_datetime'] = pd.to_datetime(checkins_df['checkin_datetime'], errors='coerce')
+        checkins_df['customer_id'] = checkins_df['customer_id'].astype(str)
+        checkins_df['checkin_date'] = checkins_df['checkin_datetime'].dt.date
+
+        # Get unlinked minors who checked in
+        unlinked_minor_ids = set(
+            customers_df[
+                (customers_df['is_minor'] == True) &
+                (~customers_df['customer_id'].isin(already_linked))
+            ]['customer_id'].astype(str)
+        )
+
+        # Get adult IDs with email
+        adult_ids = set(
+            customers_df[
+                (customers_df['age'] >= 18) &
+                (customers_df['email'].notna()) &
+                (customers_df['email'] != '')
+            ]['customer_id'].astype(str)
+        )
+
+        if unlinked_minor_ids and adult_ids:
+            # For each day, find minor+adult pairs who checked in within 5 minutes
+            minor_checkins = checkins_df[checkins_df['customer_id'].isin(unlinked_minor_ids)]
+            adult_checkins = checkins_df[checkins_df['customer_id'].isin(adult_ids)]
+
+            if not minor_checkins.empty and not adult_checkins.empty:
+                # Group by date for efficiency
+                for check_date, minor_group in minor_checkins.groupby('checkin_date'):
+                    adult_group = adult_checkins[adult_checkins['checkin_date'] == check_date]
+                    if adult_group.empty:
+                        continue
+
+                    for _, minor_row in minor_group.iterrows():
+                        minor_id = minor_row['customer_id']
+                        if minor_id in already_linked:
+                            continue
+                        minor_time = minor_row['checkin_datetime']
+
+                        # Find adults who checked in within 5 minutes
+                        time_diff = abs((adult_group['checkin_datetime'] - minor_time).dt.total_seconds())
+                        close_adults = adult_group[time_diff <= 300]  # 5 minutes
+
+                        if len(close_adults) == 1:
+                            # Exactly one adult — strong signal
+                            adult_id = close_adults.iloc[0]['customer_id']
+                            family_links.append({
+                                'parent_customer_id': adult_id,
+                                'child_customer_id': minor_id,
+                                'relationship_type': 'parent_child',
+                                'confidence': 'low',
+                                'source': 'shared_checkin'
+                            })
+                            already_linked.add(minor_id)
+                            checkin_links += 1
+
+        print(f"   ✅ Found {checkin_links} parent-child links from shared checkin timing")
+    else:
+        print("   ⚠️  No checkin data available")
+
+    # =================================================================
     # Convert to DataFrame and deduplicate
     # =================================================================
-    print("\n6. Deduplicating and finalizing...")
+    print("\n7. Deduplicating and finalizing...")
 
     if not family_links:
         print("   ⚠️  No family relationships found")
