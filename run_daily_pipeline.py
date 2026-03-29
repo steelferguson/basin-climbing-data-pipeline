@@ -296,8 +296,26 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error fetching crew interactions: {e}\n")
 
-    # 9i. Build leads table
-    print("11i. Building leads table...")
+    # 9i. Build unified events table
+    print("11i. Building unified events table...")
+    try:
+        from data_pipeline.build_events_table import upload_events_table
+        df_events_unified = upload_events_table(save_local=False)
+        print(f"✅ Events table: {len(df_events_unified):,} events\n")
+    except Exception as e:
+        print(f"❌ Error building events table: {e}\n")
+
+    # 9j. Build transactions table (with customer_id linkage)
+    print("11j. Building transactions table...")
+    try:
+        from data_pipeline.build_transactions_table import upload_transactions_table
+        df_txn_table = upload_transactions_table(save_local=False)
+        print(f"✅ Transactions table: {len(df_txn_table):,} transactions\n")
+    except Exception as e:
+        print(f"❌ Error building transactions table: {e}\n")
+
+    # 9k. Build leads table
+    print("11k. Building leads table...")
     try:
         from data_pipeline.build_leads_table import upload_leads_table
         df_leads = upload_leads_table(days_back=730, save_local=False)

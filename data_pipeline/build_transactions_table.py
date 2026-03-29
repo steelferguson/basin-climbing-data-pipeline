@@ -68,13 +68,21 @@ def upload_transactions_table(save_local: bool = False):
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
     )
 
-    csv_buf = StringIO()
-    df.to_csv(csv_buf, index=False)
-    s3.put_object(
-        Bucket="basin-climbing-data-prod",
-        Key="transactions/transactions.csv",
-        Body=csv_buf.getvalue()
+    import tempfile
+    from boto3.s3.transfer import TransferConfig
+
+    transfer_config = TransferConfig(
+        multipart_threshold=5 * 1024 * 1024,
+        max_concurrency=1,
+        multipart_chunksize=5 * 1024 * 1024,
     )
+
+    with tempfile.NamedTemporaryFile(suffix='.csv', delete=False, mode='w') as f:
+        df.to_csv(f, index=False)
+        temp_path = f.name
+
+    s3.upload_file(temp_path, "basin-climbing-data-prod", "transactions/transactions.csv", Config=transfer_config)
+    os.unlink(temp_path)
     print(f"\n✅ Uploaded {len(df)} transactions to transactions/transactions.csv")
 
     if save_local:

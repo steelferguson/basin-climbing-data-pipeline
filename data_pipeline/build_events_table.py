@@ -338,20 +338,31 @@ def upload_events_table(save_local: bool = False):
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
     )
 
-    csv_buf = StringIO()
-    df.to_csv(csv_buf, index=False)
-    body = csv_buf.getvalue()
+    # Save to temp file first, then upload (more reliable for large files)
+    import tempfile
+    from boto3.s3.transfer import TransferConfig
 
-    # Upload main file
-    s3.put_object(Bucket="basin-climbing-data-prod", Key="events/events.csv", Body=body)
+    transfer_config = TransferConfig(
+        multipart_threshold=5 * 1024 * 1024,
+        max_concurrency=1,
+        multipart_chunksize=5 * 1024 * 1024,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix='.csv', delete=False, mode='w') as f:
+        df.to_csv(f, index=False)
+        temp_path = f.name
+
+    s3.upload_file(temp_path, "basin-climbing-data-prod", "events/events.csv", Config=transfer_config)
     print(f"\n✅ Uploaded {len(df):,} events to events/events.csv")
 
     # Monthly snapshot (first of the month)
     today = datetime.now()
     if today.day == 1:
         snapshot_key = f"events/snapshots/events_{today.strftime('%Y-%m')}.csv"
-        s3.put_object(Bucket="basin-climbing-data-prod", Key=snapshot_key, Body=body)
+        s3.upload_file(temp_path, "basin-climbing-data-prod", snapshot_key, Config=transfer_config)
         print(f"✅ Snapshot saved to {snapshot_key}")
+
+    os.unlink(temp_path)
 
     if save_local:
         os.makedirs('data/outputs', exist_ok=True)
