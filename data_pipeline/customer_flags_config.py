@@ -1555,23 +1555,10 @@ class ActiveMembershipFlag(FlagRule):
                 active_members = len(self._members_df[self._members_df['status'] == 'ACT'])
                 print(f"   [ActiveMembershipFlag] Loaded {len(self._members_df)} members ({active_members} active)")
 
-                # Load customer_identifiers to build UUID -> Capitan ID mapping
-                obj_ids = s3_client.get_object(
-                    Bucket='basin-climbing-data-prod',
-                    Key='customers/customer_identifiers.csv'
-                )
-                df_identifiers = pd.read_csv(StringIO(obj_ids['Body'].read().decode('utf-8')))
-
-                # Build mapping from UUID customer_id to Capitan numeric ID
-                # source_id format is "customer:1834008"
-                for _, row in df_identifiers.iterrows():
-                    uuid_id = str(row['customer_id'])
-                    source_id = str(row.get('source_id', ''))
-                    if source_id.startswith('customer:'):
-                        capitan_id = source_id.replace('customer:', '')
-                        # Only keep first mapping (they should all be the same for a UUID)
-                        if uuid_id not in self._uuid_to_capitan_id:
-                            self._uuid_to_capitan_id[uuid_id] = capitan_id
+                # Load UUID -> Capitan ID mapping from shared utility
+                from data_pipeline.id_mapping import get_id_mappings
+                uuid_to_cap, _ = get_id_mappings()
+                self._uuid_to_capitan_id.update(uuid_to_cap)
 
                 print(f"   [ActiveMembershipFlag] Built UUID->Capitan mapping for {len(self._uuid_to_capitan_id)} customers")
             else:
@@ -1712,20 +1699,10 @@ class ActivePrepaidPassFlag(FlagRule):
                 )
                 self._memberships_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
 
-                # Load customer_identifiers to build UUID -> Capitan ID mapping
-                obj_ids = s3_client.get_object(
-                    Bucket='basin-climbing-data-prod',
-                    Key='customers/customer_identifiers.csv'
-                )
-                df_identifiers = pd.read_csv(StringIO(obj_ids['Body'].read().decode('utf-8')))
-
-                for _, row in df_identifiers.iterrows():
-                    uuid_id = str(row['customer_id'])
-                    source_id = str(row.get('source_id', ''))
-                    if source_id.startswith('customer:'):
-                        capitan_id = source_id.replace('customer:', '')
-                        if uuid_id not in self._uuid_to_capitan_id:
-                            self._uuid_to_capitan_id[uuid_id] = capitan_id
+                # Load UUID -> Capitan ID mapping from shared utility
+                from data_pipeline.id_mapping import get_id_mappings
+                uuid_to_cap, _ = get_id_mappings()
+                self._uuid_to_capitan_id.update(uuid_to_cap)
             else:
                 self._memberships_df = pd.DataFrame()
 
@@ -1874,20 +1851,10 @@ class HasYouthFlag(FlagRule):
                     print("   [HasYouthFlag] No sync_history.csv found")
                     self._sync_history_df = pd.DataFrame(columns=['capitan_customer_id', 'tag_name', 'action'])
 
-                # Load customer_identifiers to build UUID -> Capitan ID mapping
-                obj_ids = s3_client.get_object(
-                    Bucket='basin-climbing-data-prod',
-                    Key='customers/customer_identifiers.csv'
-                )
-                df_identifiers = pd.read_csv(StringIO(obj_ids['Body'].read().decode('utf-8')))
-
-                for _, row in df_identifiers.iterrows():
-                    uuid_id = str(row['customer_id'])
-                    source_id = str(row.get('source_id', ''))
-                    if source_id.startswith('customer:'):
-                        capitan_id = source_id.replace('customer:', '')
-                        if uuid_id not in self._uuid_to_capitan_id:
-                            self._uuid_to_capitan_id[uuid_id] = capitan_id
+                # Load UUID -> Capitan ID mapping from shared utility
+                from data_pipeline.id_mapping import get_id_mappings
+                uuid_to_cap, _ = get_id_mappings()
+                self._uuid_to_capitan_id.update(uuid_to_cap)
 
                 print(f"   [HasYouthFlag] Built UUID->Capitan mapping for {len(self._uuid_to_capitan_id)} customers")
             else:

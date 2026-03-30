@@ -736,50 +736,19 @@ class ShopifyFlagSyncer:
             print(f"✅ Loaded {len(df_master)} customers from customer_master_v2.csv")
             print(f"   With email: {df_master['email'].notna().sum()}, With phone: {df_master['phone'].notna().sum()}")
 
-            # Load customer identifiers (maps Capitan IDs to UUIDs)
-            try:
-                obj = self.s3_client.get_object(
-                    Bucket=self.bucket_name,
-                    Key="customers/customer_identifiers.csv"
-                )
-                df_idents = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            # Create UUID-based records from the uuid column in v2
+            # This lets us match flags using either Capitan ID or UUID
+            df_full = pd.read_csv(StringIO(
+                self.s3_client.get_object(Bucket=self.bucket_name, Key="customers/customer_master_v2.csv")['Body'].read().decode('utf-8')
+            ))
+            uuid_rows = df_full[df_full['uuid'].notna()][['uuid', 'contact_email', 'contact_phone', 'first_name', 'last_name']].copy()
+            uuid_rows = uuid_rows.rename(columns={'uuid': 'customer_id', 'contact_email': 'email', 'contact_phone': 'phone'})
 
-                # Filter to capitan source and extract capitan_id
-                df_capitan_idents = df_idents[df_idents['source'] == 'capitan'].copy()
-                df_capitan_idents['capitan_id'] = df_capitan_idents['source_id'].str.replace('customer:', '', regex=False)
-                df_capitan_idents = df_capitan_idents[['customer_id', 'capitan_id']].copy()
-                df_capitan_idents['capitan_id'] = df_capitan_idents['capitan_id'].astype(str)
+            df_combined = pd.concat([df_master, uuid_rows], ignore_index=True)
+            df_combined = df_combined.drop_duplicates(subset=['customer_id'], keep='first')
 
-                # Create UUID-based customer records by merging
-                # This maps UUID -> Capitan ID -> contact info
-                df_uuid_customers = df_capitan_idents.merge(
-                    df_master,
-                    left_on='capitan_id',
-                    right_on='customer_id',
-                    how='inner',
-                    suffixes=('_uuid', '_capitan')
-                )
-
-                # Keep UUID as the customer_id, drop the capitan_id columns
-                df_uuid_customers = df_uuid_customers.rename(columns={'customer_id_uuid': 'customer_id'})
-                df_uuid_customers = df_uuid_customers[['customer_id', 'email', 'phone', 'first_name', 'last_name']].copy()
-
-                print(f"✅ Created {len(df_uuid_customers)} UUID-mapped customer records")
-
-                # Combine both: Capitan IDs (original) + UUID mappings
-                # This ensures we can match flags using either ID format
-                df_combined = pd.concat([df_master, df_uuid_customers], ignore_index=True)
-                df_combined = df_combined.drop_duplicates(subset=['customer_id'], keep='first')
-
-                print(f"✅ Combined total: {len(df_combined)} customer records (Capitan + UUID)")
-                print(f"   With email: {df_combined['email'].notna().sum()}, With phone: {df_combined['phone'].notna().sum()}")
-
-                return df_combined
-
-            except Exception as e:
-                print(f"⚠️  Could not load customer_identifiers.csv: {e}")
-                print("   Continuing with Capitan IDs only (UUID-based flags may not sync)")
-                return df_master
+            print(f"✅ Combined: {len(df_combined)} customer records (Capitan + UUID)")
+            return df_combined
 
         except Exception as e:
             print(f"⚠️  Could not load customer_master_v2.csv, falling back to old method: {e}")

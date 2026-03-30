@@ -524,6 +524,17 @@ def build_customer_master() -> pd.DataFrame:
     )
 
     # =========================================================
+    # Backward-compatible alias columns
+    # These let old scripts that read customers_master.csv work with v2
+    # =========================================================
+    master['primary_email'] = master['contact_email']
+    master['primary_phone'] = master['contact_phone']
+    master['primary_name'] = (master['first_name'].fillna('') + ' ' + master['last_name'].fillna('')).str.strip()
+    master['first_seen'] = master['first_checkin']
+    master['last_seen'] = master['last_checkin']
+    master['sources'] = 'capitan'
+
+    # =========================================================
     # Summary
     # =========================================================
     print(f"\n{'=' * 70}")
