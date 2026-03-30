@@ -55,10 +55,12 @@ def build_customer_master() -> pd.DataFrame:
     df_capitan = load_s3('capitan/customers.csv')
     print(f"  Capitan customers: {len(df_capitan)}")
 
+    # UUID mapping — customer_master can't read from itself, so use identifiers
+    # (this is the one file that still needs customer_identifiers.csv as input)
     df_identifiers = load_s3('customers/customer_identifiers.csv')
     if not df_identifiers.empty:
         df_identifiers['capitan_id'] = df_identifiers['source_id'].str.replace('customer:', '', regex=False)
-    print(f"  Customer identifiers: {len(df_identifiers)}")
+    print(f"  Customer identifiers (UUID mapping): {len(df_identifiers)}")
 
     df_family = load_s3('customers/family_relationships.csv')
     if not df_family.empty:

@@ -49,14 +49,14 @@ def build_events_table() -> pd.DataFrame:
 
     all_events = []
 
-    # UUID → Capitan ID mapping
-    df_identifiers = load_s3('customers/customer_identifiers.csv')
+    # UUID → Capitan ID mapping (from customer_master_v2)
+    df_cm = load_s3('customers/customer_master_v2.csv')
     uuid_to_capitan = {}
-    if not df_identifiers.empty:
-        df_identifiers['capitan_id'] = df_identifiers['source_id'].str.replace('customer:', '', regex=False)
+    if not df_cm.empty:
+        mapped = df_cm[df_cm['uuid'].notna()]
         uuid_to_capitan = dict(zip(
-            df_identifiers['customer_id'].astype(str),
-            df_identifiers['capitan_id'].astype(str)
+            mapped['uuid'].astype(str),
+            mapped['customer_id'].astype(str)
         ))
     print(f"  UUID→Capitan mappings: {len(uuid_to_capitan)}")
 
