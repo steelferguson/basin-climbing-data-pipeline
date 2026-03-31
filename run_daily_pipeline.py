@@ -430,21 +430,27 @@ def run_daily_pipeline():
     except Exception as e:
         print(f"❌ Error sending birthday reminders: {e}\n")
 
-    # 15b. Sync completed party attendees to Klaviyo (triggers follow-up journey)
-    print("17b. Syncing completed party attendees to Klaviyo...")
-    print("     - Adds to 'Post Birthday Party - Attendees' list")
-    print("     - Triggers follow-up email journey")
+    # 15b. Sync completed party attendees to Klaviyo (RSVP-based)
+    print("17b. Syncing completed party attendees to Klaviyo (RSVP)...")
     try:
         from data_pipeline.sync_birthday_party_attendees_to_klaviyo import sync_completed_party_attendees
         results = sync_completed_party_attendees(days_back=7, dry_run=False)
-        print(f"✅ Synced {results.get('synced', 0)} party attendees to Klaviyo\n")
+        print(f"✅ Synced {results.get('synced', 0)} RSVP attendees to Klaviyo\n")
     except Exception as e:
-        print(f"❌ Error syncing party attendees: {e}\n")
+        print(f"❌ Error syncing RSVP attendees: {e}\n")
 
-    # 15c. Sync completed party hosts to Klaviyo (triggers follow-up journey)
+    # 15b2. Sync birthday check-in attendees to Klaviyo (Capitan event checkins)
+    print("17b2. Syncing birthday check-in attendees to Klaviyo...")
+    print("     - People who physically checked into a birthday party event")
+    try:
+        from data_pipeline.sync_birthday_checkin_attendees import sync_birthday_checkin_attendees
+        results = sync_birthday_checkin_attendees(days_back=7, dry_run=False)
+        print(f"✅ Synced {results.get('synced', 0)} check-in attendees to Klaviyo\n")
+    except Exception as e:
+        print(f"❌ Error syncing check-in attendees: {e}\n")
+
+    # 15c. Sync completed party hosts to Klaviyo
     print("17c. Syncing completed party hosts to Klaviyo...")
-    print("     - Adds to 'Post Birthday Party - Hosts' list")
-    print("     - Triggers follow-up email journey")
     try:
         from data_pipeline.sync_birthday_party_hosts_to_klaviyo import sync_completed_party_hosts
         results = sync_completed_party_hosts(days_back=7, dry_run=False)
