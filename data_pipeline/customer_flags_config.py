@@ -710,11 +710,12 @@ class BirthdayPartyHostOneWeekOutFlag(FlagRule):
     Flag customers who are hosting a birthday party in 7 days.
 
     Business logic:
-    - Customer's email matches a host_email in birthday_parties table
-    - Party date is exactly 7 days from today
-    - Party hasn't already happened
-    - Hasn't been flagged for this party in the last 7 days (prevent duplicates)
+    - Customer's email matches a host_email in birthday/parties.csv (from S3)
+    - Party date is approximately 7 days from today
+    - Hasn't been flagged for this party in the last 7 days
     """
+
+    _parties_df = None  # Cached — loaded once, shared across all customers
 
     def __init__(self):
         super().__init__(
@@ -723,93 +724,77 @@ class BirthdayPartyHostOneWeekOutFlag(FlagRule):
             priority="high"
         )
 
-    def evaluate(self, customer_id: str, events: list, today: datetime, email: str = None, phone: str = None) -> Dict[str, Any]:
-        """
-        Check if customer is hosting a party in 7 days.
-
-        This requires querying BigQuery birthday_parties table.
-        The flag engine should call this with the customer's email.
-        """
-        if not email:
-            return None  # Can't match without email
+    def _load_parties(self):
+        """Load birthday parties from S3 (cached)."""
+        if BirthdayPartyHostOneWeekOutFlag._parties_df is not None:
+            return BirthdayPartyHostOneWeekOutFlag._parties_df
 
         try:
-            from google.cloud import bigquery
-            import os
+            import boto3, os
+            s3 = boto3.client('s3',
+                aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'))
+            obj = s3.get_object(Bucket='basin-climbing-data-prod', Key='birthday/parties.csv')
+            df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            BirthdayPartyHostOneWeekOutFlag._parties_df = df
+            return df
+        except Exception as e:
+            print(f"   ⚠️  Could not load birthday parties: {e}")
+            return pd.DataFrame()
 
-            # Initialize BigQuery client
-            client = bigquery.Client()
+    def evaluate(self, customer_id: str, events: list, today: datetime, email: str = None, phone: str = None) -> Dict[str, Any]:
+        if not email:
+            return None
 
-            # Query for parties where this customer is the host
+        try:
+            df = self._load_parties()
+            if df.empty:
+                return None
+
             target_date = today + timedelta(days=7)
-            target_date_str = target_date.strftime('%Y-%m-%d')
 
-            query = f"""
-                SELECT
-                    party_id,
-                    host_email,
-                    child_name,
-                    party_date,
-                    party_time,
-                    total_yes,
-                    total_guests
-                FROM `basin_data.birthday_parties`
-                WHERE LOWER(host_email) = LOWER(@email)
-                  AND party_date = @target_date
-                LIMIT 1
-            """
+            # Match by email and party date
+            matches = df[
+                (df['host_email'].str.lower().str.strip() == email.lower().strip()) &
+                (df['party_date'].astype(str).str.contains(target_date.strftime('%B %-d, %Y'), case=False, na=False) |
+                 df['party_date'].astype(str).str.contains(target_date.strftime('%Y-%m-%d'), na=False))
+            ]
 
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("email", "STRING", email),
-                    bigquery.ScalarQueryParameter("target_date", "STRING", target_date_str),
-                ]
-            )
+            if matches.empty:
+                return None
 
-            results = client.query(query, job_config=job_config).result()
-            party_row = None
-            for row in results:
-                party_row = row
-                break
+            party = matches.iloc[0]
 
-            if not party_row:
-                return None  # No party found for this customer in 7 days
-
-            # Check if already flagged for this party in last 7 days
+            # Check if already flagged
             lookback_start = today - timedelta(days=7)
             recent_flags = [
                 e for e in events
-                if e['event_type'] == 'flag_set'
+                if e.get('event_type') == 'flag_set'
                 and isinstance(e.get('event_data'), dict)
                 and e.get('event_data', {}).get('flag_type') == self.flag_type
-                and e.get('event_data', {}).get('party_id') == party_row.party_id
                 and e['event_date'] >= lookback_start
-                and e['event_date'] <= today
             ]
-
             if recent_flags:
-                return None  # Already flagged for this party
+                return None
 
-            # All criteria met - flag this customer
             return {
                 'customer_id': customer_id,
                 'flag_type': self.flag_type,
                 'triggered_date': today,
                 'flag_data': {
-                    'party_id': party_row.party_id,
-                    'child_name': party_row.child_name,
-                    'party_date': party_row.party_date,
-                    'party_time': party_row.party_time if hasattr(party_row, 'party_time') else None,
+                    'party_id': party.get('party_id', ''),
+                    'child_name': party.get('child_name', ''),
+                    'party_date': str(party.get('party_date', '')),
                     'days_until_party': 7,
-                    'total_rsvp_yes': party_row.total_yes if hasattr(party_row, 'total_yes') else 0,
-                    'total_guests': party_row.total_guests if hasattr(party_row, 'total_guests') else 0,
-                    'description': self.description
+                    'total_rsvp_yes': int(party.get('total_yes', 0)),
+                    'description': self.description,
+                    'flag_description': 'Customer is hosting a birthday party in 7 days',
                 },
                 'priority': self.priority
             }
 
         except Exception as e:
-            print(f"   ⚠️  Error querying birthday parties for customer {customer_id}: {e}")
+            print(f"   ⚠️  Error checking birthday party for customer {customer_id}: {e}")
             return None
 
 
@@ -832,98 +817,74 @@ class BirthdayPartyAttendeeOneWeekOutFlag(FlagRule):
             priority="medium"
         )
 
-    def evaluate(self, customer_id: str, events: list, today: datetime, email: str = None, phone: str = None) -> Dict[str, Any]:
-        """
-        Check if customer RSVP'd yes to a party in 7 days.
+    _rsvps_df = None  # Cached
 
-        This requires querying BigQuery birthday_party_rsvps table.
-        """
+    def evaluate(self, customer_id: str, events: list, today: datetime, email: str = None, phone: str = None) -> Dict[str, Any]:
         if not email:
-            return None  # Can't match without email
+            return None
 
         try:
-            from google.cloud import bigquery
+            # Load RSVPs + parties from S3 (cached)
+            if BirthdayPartyAttendeeOneWeekOutFlag._rsvps_df is None:
+                import boto3, os
+                s3 = boto3.client('s3',
+                    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'))
+                obj_r = s3.get_object(Bucket='basin-climbing-data-prod', Key='birthday/rsvps.csv')
+                df_rsvps = pd.read_csv(StringIO(obj_r['Body'].read().decode('utf-8')))
+                obj_p = s3.get_object(Bucket='basin-climbing-data-prod', Key='birthday/parties.csv')
+                df_parties = pd.read_csv(StringIO(obj_p['Body'].read().decode('utf-8')))
+                BirthdayPartyAttendeeOneWeekOutFlag._rsvps_df = df_rsvps.merge(
+                    df_parties[['party_id', 'party_date', 'child_name', 'host_email']],
+                    on='party_id', how='left'
+                )
 
-            # Initialize BigQuery client
-            client = bigquery.Client()
+            df = BirthdayPartyAttendeeOneWeekOutFlag._rsvps_df
+            if df.empty:
+                return None
 
-            # Query for RSVPs where this customer said yes
             target_date = today + timedelta(days=7)
-            target_date_str = target_date.strftime('%Y-%m-%d')
 
-            query = f"""
-                SELECT
-                    r.party_id,
-                    r.rsvp_id,
-                    r.guest_name,
-                    r.attending,
-                    r.num_adults,
-                    r.num_kids,
-                    p.child_name,
-                    p.party_date,
-                    p.party_time,
-                    p.host_email
-                FROM `basin_data.birthday_party_rsvps` r
-                JOIN `basin_data.birthday_parties` p ON r.party_id = p.party_id
-                WHERE LOWER(r.email) = LOWER(@email)
-                  AND r.attending = 'yes'
-                  AND p.party_date = @target_date
-                LIMIT 1
-            """
+            matches = df[
+                (df['email'].str.lower().str.strip() == email.lower().strip()) &
+                (df['attending'] == 'yes') &
+                (df['party_date'].astype(str).str.contains(target_date.strftime('%B %-d, %Y'), case=False, na=False) |
+                 df['party_date'].astype(str).str.contains(target_date.strftime('%Y-%m-%d'), na=False))
+            ]
 
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("email", "STRING", email),
-                    bigquery.ScalarQueryParameter("target_date", "STRING", target_date_str),
-                ]
-            )
+            if matches.empty:
+                return None
 
-            results = client.query(query, job_config=job_config).result()
-            rsvp_row = None
-            for row in results:
-                rsvp_row = row
-                break
+            rsvp = matches.iloc[0]
 
-            if not rsvp_row:
-                return None  # No 'yes' RSVP found for this customer in 7 days
-
-            # Check if already flagged for this party in last 7 days
             lookback_start = today - timedelta(days=7)
             recent_flags = [
                 e for e in events
-                if e['event_type'] == 'flag_set'
+                if e.get('event_type') == 'flag_set'
                 and isinstance(e.get('event_data'), dict)
                 and e.get('event_data', {}).get('flag_type') == self.flag_type
-                and e.get('event_data', {}).get('party_id') == rsvp_row.party_id
                 and e['event_date'] >= lookback_start
-                and e['event_date'] <= today
             ]
-
             if recent_flags:
-                return None  # Already flagged for this party
+                return None
 
-            # All criteria met - flag this customer
             return {
                 'customer_id': customer_id,
                 'flag_type': self.flag_type,
                 'triggered_date': today,
                 'flag_data': {
-                    'party_id': rsvp_row.party_id,
-                    'rsvp_id': rsvp_row.rsvp_id,
-                    'child_name': rsvp_row.child_name,
-                    'party_date': rsvp_row.party_date,
-                    'party_time': rsvp_row.party_time if hasattr(rsvp_row, 'party_time') else None,
+                    'party_id': rsvp.get('party_id', ''),
+                    'child_name': rsvp.get('child_name', ''),
+                    'party_date': str(rsvp.get('party_date', '')),
                     'days_until_party': 7,
-                    'host_email': rsvp_row.host_email if hasattr(rsvp_row, 'host_email') else None,
-                    'num_adults': rsvp_row.num_adults if hasattr(rsvp_row, 'num_adults') else 0,
-                    'num_kids': rsvp_row.num_kids if hasattr(rsvp_row, 'num_kids') else 0,
-                    'description': self.description
+                    'description': self.description,
+                    'flag_description': "Customer RSVP'd yes to a birthday party in 7 days",
                 },
                 'priority': self.priority
             }
 
         except Exception as e:
-            print(f"   ⚠️  Error querying birthday party RSVPs for customer {customer_id}: {e}")
+            print(f"   ⚠️  Error checking birthday RSVPs for customer {customer_id}: {e}")
             return None
 
 
@@ -952,106 +913,66 @@ class BirthdayPartyHostSixDaysOutFlag(FlagRule):
         This requires querying BigQuery birthday_parties table.
         """
         if not email:
-            return None  # Can't match without email
+            return None
 
         try:
-            from google.cloud import bigquery
+            # Reuse the cached parties from the 7-day flag
+            df = BirthdayPartyHostOneWeekOutFlag._parties_df
+            if df is None:
+                # Load if not cached yet
+                import boto3, os
+                s3 = boto3.client('s3',
+                    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'))
+                obj = s3.get_object(Bucket='basin-climbing-data-prod', Key='birthday/parties.csv')
+                df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+                BirthdayPartyHostOneWeekOutFlag._parties_df = df
 
-            # Initialize BigQuery client
-            client = bigquery.Client()
+            if df.empty:
+                return None
 
-            # Query for parties where this customer is the host
             target_date = today + timedelta(days=6)
-            target_date_str = target_date.strftime('%Y-%m-%d')
 
-            query = f"""
-                SELECT
-                    party_id,
-                    child_name,
-                    party_date,
-                    party_time,
-                    host_email,
-                    host_name,
-                    total_guests,
-                    party_package
-                FROM `basin_data.birthday_parties`
-                WHERE LOWER(host_email) = LOWER(@email)
-                  AND party_date = @target_date
-                LIMIT 1
-            """
+            matches = df[
+                (df['host_email'].str.lower().str.strip() == email.lower().strip()) &
+                (df['party_date'].astype(str).str.contains(target_date.strftime('%B %-d, %Y'), case=False, na=False) |
+                 df['party_date'].astype(str).str.contains(target_date.strftime('%Y-%m-%d'), na=False))
+            ]
 
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("email", "STRING", email),
-                    bigquery.ScalarQueryParameter("target_date", "STRING", target_date_str),
-                ]
-            )
+            if matches.empty:
+                return None
 
-            results = client.query(query, job_config=job_config).result()
-            party_row = None
-            for row in results:
-                party_row = row
-                break
+            party = matches.iloc[0]
 
-            if not party_row:
-                return None  # No party found for this host in 6 days
-
-            # Count how many attendees were sent reminders yesterday (those who had phone and opted in)
-            # For now, count all 'yes' RSVPs - we'll refine this later to track actual sends
-            rsvp_query = f"""
-                SELECT COUNT(*) as yes_count
-                FROM `basin_data.birthday_party_rsvps`
-                WHERE party_id = @party_id
-                  AND attending = 'yes'
-            """
-
-            rsvp_job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("party_id", "STRING", party_row.party_id),
-                ]
-            )
-
-            rsvp_results = client.query(rsvp_query, job_config=rsvp_job_config).result()
-            yes_count = 0
-            for row in rsvp_results:
-                yes_count = row.yes_count
-                break
-
-            # Check if already flagged for this party in last 7 days
             lookback_start = today - timedelta(days=7)
             recent_flags = [
                 e for e in events
-                if e['event_type'] == 'flag_set'
+                if e.get('event_type') == 'flag_set'
                 and isinstance(e.get('event_data'), dict)
                 and e.get('event_data', {}).get('flag_type') == self.flag_type
-                and e.get('event_data', {}).get('party_id') == party_row.party_id
                 and e['event_date'] >= lookback_start
-                and e['event_date'] <= today
             ]
-
             if recent_flags:
-                return None  # Already flagged for this party
+                return None
 
-            # All criteria met - flag this customer
             return {
+                'customer_id': customer_id,
                 'flag_type': self.flag_type,
-                'description': self.description,
+                'triggered_date': today,
                 'flag_data': {
-                    'party_id': party_row.party_id,
-                    'child_name': party_row.child_name,
-                    'party_date': target_date_str,
-                    'party_time': party_row.party_time if party_row.party_time else '',
-                    'host_email': party_row.host_email,
-                    'host_name': party_row.host_name if party_row.host_name else '',
-                    'total_guests': party_row.total_guests if party_row.total_guests else 0,
-                    'yes_rsvp_count': yes_count,
-                    'party_package': party_row.party_package if party_row.party_package else ''
+                    'party_id': party.get('party_id', ''),
+                    'child_name': party.get('child_name', ''),
+                    'party_date': str(party.get('party_date', '')),
+                    'days_until_party': 6,
+                    'total_rsvp_yes': int(party.get('total_yes', 0)),
+                    'description': self.description,
+                    'flag_description': 'Customer is hosting a birthday party in 6 days',
                 },
                 'priority': self.priority
             }
 
         except Exception as e:
-            print(f"   ⚠️  Error querying birthday parties for host notification {customer_id}: {e}")
+            print(f"   ⚠️  Error checking birthday party 6-day for customer {customer_id}: {e}")
             return None
 
 
