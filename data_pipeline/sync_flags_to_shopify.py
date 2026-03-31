@@ -93,19 +93,21 @@ class ShopifyFlagSyncer:
         # Map flag types to Klaviyo list IDs for flow triggers
         # When a flag is synced to Shopify, also add the member to the Klaviyo list
         self.klaviyo_flag_list_map = {
-            # 'membership_cancelled_winback': 'VbbZSy',  # Membership Win-Back flow - DISABLED: flow not configured yet
-            'first_time_day_pass_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer list
-            'second_visit_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer list
-            '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer list
-            'has_youth': 'XJMJMS',  # Has Youth list
-            # 'new_member': 'Y5vi7J',  # New Members list - DISABLED: flow not configured yet
-            # Birthday: pre-party engagement flows
+            # Day pass → 2-week offer (all day pass visitors go here)
+            'first_time_day_pass_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer
+            'second_visit_offer_eligible': 'RX9TsQ',    # Also goes to 2 Week Offer (AB test removed)
+            # 2-week pass → membership
+            '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer
+            # New members
+            'new_member': 'Wk2jgP',  # New Members (flow now live)
+            # Youth
+            'has_youth': 'XJMJMS',  # Has Youth
+            # Birthday: pre-party
             'birthday_party_host_one_week_out': 'SvaqcF',  # Birthday Party Booked - Host
             'birthday_party_host_six_days_out': 'SvaqcF',  # Birthday Party Booked - Host
             'birthday_party_attendee_one_week_out': 'RS9mA4',  # Birthday Party RSVP - Attendee
-            # Post-party flows also synced by dedicated scripts for broader reach
-            # (sync_birthday_party_hosts_to_klaviyo.py → UqafAY)
-            # (sync_birthday_party_attendees_to_klaviyo.py → VvigsY)
+            # Win-back
+            'membership_cancelled_winback': 'VbbZSy',  # Membership Win-Back
         }
 
         # Additional tags to add alongside the primary tag (for aliases/variations)
