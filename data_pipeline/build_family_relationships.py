@@ -301,28 +301,58 @@ def build_family_relationships(
                         'source': 'last_name_match'
                     })
                     fuzzy_links += 1
-                elif len(matching_adults) <= 10:
-                    # Multiple adults with same last name — tiebreakers:
-                    # 1. Active membership
-                    # 2. Has check-ins (most visits)
-                    active = matching_adults[matching_adults.get('has_active_membership', pd.Series(False)) == True]
-                    if len(active) == 1:
-                        parent = active.iloc[0]
-                        source = 'last_name_match_active_member'
-                    elif len(active) > 1:
-                        # Multiple active members with same name — skip (ambiguous)
-                        continue
-                    else:
-                        # No active member — skip (too ambiguous without membership signal)
-                        continue
-                    family_links.append({
-                        'parent_customer_id': parent['customer_id'],
-                        'child_customer_id': child['customer_id'],
-                        'relationship_type': 'parent_child',
-                        'confidence': 'low',
-                        'source': source
-                    })
-                    fuzzy_links += 1
+                else:
+                    # Multiple adults with same last name — tiebreakers
+                    parent = None
+                    source = None
+
+                    # Tiebreaker 1: Same-day checkin with child
+                    if checkins_df is not None and not checkins_df.empty:
+                        child_id = str(child['customer_id'])
+                        child_checkin_dates = set(
+                            checkins_df[checkins_df['customer_id'].astype(str) == child_id]['checkin_date'].dropna()
+                        )
+                        if child_checkin_dates:
+                            covisit_counts = {}
+                            for _, adult in matching_adults.iterrows():
+                                adult_id = str(adult['customer_id'])
+                                adult_dates = set(
+                                    checkins_df[checkins_df['customer_id'].astype(str) == adult_id]['checkin_date'].dropna()
+                                )
+                                overlap = len(child_checkin_dates & adult_dates)
+                                if overlap > 0:
+                                    covisit_counts[adult_id] = overlap
+
+                            if len(covisit_counts) == 1:
+                                # Exactly one adult visited on the same day
+                                winner_id = list(covisit_counts.keys())[0]
+                                parent = matching_adults[matching_adults['customer_id'].astype(str) == winner_id].iloc[0]
+                                source = 'last_name_covisit'
+                            elif len(covisit_counts) > 1:
+                                # Multiple co-visitors — pick the one with most overlap days
+                                best_id = max(covisit_counts, key=covisit_counts.get)
+                                best_count = covisit_counts[best_id]
+                                second_best = sorted(covisit_counts.values(), reverse=True)[1] if len(covisit_counts) > 1 else 0
+                                if best_count >= 2 * second_best:  # Clear winner
+                                    parent = matching_adults[matching_adults['customer_id'].astype(str) == best_id].iloc[0]
+                                    source = 'last_name_covisit_best'
+
+                    # Tiebreaker 2: Exactly 1 active member with same name
+                    if parent is None:
+                        active = matching_adults[matching_adults.get('has_active_membership', pd.Series(False)) == True]
+                        if len(active) == 1:
+                            parent = active.iloc[0]
+                            source = 'last_name_match_active_member'
+
+                    if parent is not None:
+                        family_links.append({
+                            'parent_customer_id': parent['customer_id'],
+                            'child_customer_id': child['customer_id'],
+                            'relationship_type': 'parent_child',
+                            'confidence': 'low',
+                            'source': source
+                        })
+                        fuzzy_links += 1
 
         print(f"   ✅ Found {fuzzy_links} parent-child links from last name matching")
         print(f"   (from {len(unlinked_minors)} unlinked minors without email)")
