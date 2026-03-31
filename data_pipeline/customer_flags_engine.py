@@ -429,11 +429,12 @@ class CustomerFlagsEngine:
             aws_secret_access_key=aws_secret_access_key
         )
 
-        # 0. Load Capitan ID → UUID mapping FIRST (used by all data sources)
-        print("\n🔗 Loading Capitan ID → UUID mapping...")
+        # 0. Load UUID → Capitan ID mapping (normalize everything to Capitan IDs
+        # so email lookups work via customer_master_v2)
+        print("\n🔗 Loading UUID → Capitan ID mapping...")
         from data_pipeline.id_mapping import get_id_mappings
-        _, capitan_to_uuid = get_id_mappings()
-        print(f"   ✅ Loaded {len(capitan_to_uuid)} Capitan→UUID mappings")
+        uuid_to_capitan, _ = get_id_mappings()
+        print(f"   ✅ Loaded {len(uuid_to_capitan)} UUID→Capitan mappings")
 
         # 1. Load customer_events.csv (has purchases, memberships, etc.)
         print("\n📂 Loading customer events...")
@@ -443,14 +444,15 @@ class CustomerFlagsEngine:
             df_events['event_date'] = pd.to_datetime(df_events['event_date'], format='mixed', utc=True)
             df_events['event_date'] = df_events['event_date'].dt.tz_localize(None)
 
-            # Normalize any Capitan IDs to UUIDs (some old events may have Capitan IDs)
+            # Normalize UUIDs to Capitan IDs so flag email lookups work
             df_events['customer_id'] = df_events['customer_id'].astype(str)
-            original_capitan = df_events['customer_id'].apply(lambda x: '-' not in str(x)).sum()
+            original_uuids = df_events['customer_id'].apply(lambda x: '-' in str(x)).sum()
             df_events['customer_id'] = df_events['customer_id'].map(
-                lambda x: capitan_to_uuid.get(x, x) if '-' not in x else x
+                lambda x: uuid_to_capitan.get(x, x) if '-' in x else x
             )
-            mapped_to_uuid = df_events['customer_id'].apply(lambda x: '-' in str(x)).sum()
-            print(f"   📊 Normalized {original_capitan} Capitan IDs → {mapped_to_uuid} now have UUIDs")
+            mapped_to_capitan = df_events['customer_id'].apply(lambda x: '-' not in str(x)).sum()
+            still_uuid = df_events['customer_id'].apply(lambda x: '-' in str(x)).sum()
+            print(f"   📊 Normalized {original_uuids} UUIDs → {mapped_to_capitan} now Capitan IDs, {still_uuid} unmapped")
 
             # Parse event_details JSON into event_data for purchase events
             # This makes purchase descriptions available to flag rules
@@ -500,13 +502,8 @@ class CustomerFlagsEngine:
             df_checkins['checkin_datetime'] = pd.to_datetime(df_checkins['checkin_datetime'])
             print(f"   ✅ Loaded {len(df_checkins)} checkins")
 
-            # 2a. Apply Capitan ID → UUID mapping (loaded earlier in step 0)
+            # Checkins already have Capitan IDs — keep as-is (matches customer_master_v2)
             df_checkins['customer_id'] = df_checkins['customer_id'].astype(str)
-            df_checkins['customer_id'] = df_checkins['customer_id'].map(
-                lambda x: capitan_to_uuid.get(x, x)  # Keep original if no mapping
-            )
-            mapped_count = df_checkins['customer_id'].apply(lambda x: '-' in str(x)).sum()
-            print(f"   📊 Mapped {mapped_count}/{len(df_checkins)} checkins to UUIDs")
 
             # Convert checkins to event format
             checkin_events = []
@@ -538,15 +535,14 @@ class CustomerFlagsEngine:
                 )
                 df_family = pd.read_csv(StringIO(obj_family['Body'].read().decode('utf-8')))
 
-                # Convert child_ids to UUIDs using the mapping we loaded earlier
-                child_capitan_ids = set(df_family['child_customer_id'].astype(str))
-                child_uuids = set(
-                    capitan_to_uuid.get(cid, cid) for cid in child_capitan_ids
+                # Family relationships use Capitan IDs (same as checkins now)
+                child_ids = set(
+                    str(int(float(cid))) for cid in df_family['child_customer_id'].dropna()
                 )
 
-                # Filter checkins (which now have UUIDs) for children with day passes
+                # Filter checkins for children with day passes
                 child_day_pass_checkins = df_checkins[
-                    (df_checkins['customer_id'].isin(child_uuids)) &
+                    (df_checkins['customer_id'].isin(child_ids)) &
                     (df_checkins['entry_method'].isin(['ENT', 'GUE']))
                 ]
 
