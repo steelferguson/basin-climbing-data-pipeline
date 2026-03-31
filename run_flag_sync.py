@@ -111,6 +111,15 @@ def run_flag_sync():
         import traceback
         traceback.print_exc()
 
+    # 5b. Sync birthday check-in attendees to Klaviyo
+    print("5b. Syncing birthday check-in attendees to Klaviyo...", flush=True)
+    try:
+        from data_pipeline.sync_birthday_checkin_attendees import sync_birthday_checkin_attendees
+        results = sync_birthday_checkin_attendees(days_back=7, dry_run=False)
+        print(f"✅ Synced {results.get('synced', 0)} check-in attendees to Klaviyo\n", flush=True)
+    except Exception as e:
+        print(f"❌ Error syncing check-in attendees: {e}\n", flush=True)
+
     # 6. Sync day pass customers to Klaviyo for 50% off second visit offer
     print("6. Syncing day pass customers for 50% off second visit offer...", flush=True)
     try:

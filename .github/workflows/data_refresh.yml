@@ -1,0 +1,42 @@
+name: Data Refresh (Light)
+
+# Light data refresh — runs 3x daily, 1 hour before flag sync.
+# Fetches checkins, memberships, builds customer master + events.
+# Does NOT fetch heavy API data (revenue, Instagram, GA4, etc.)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * *'  # 7 AM CT (12 UTC)
+    - cron: '0 19 * * *'  # 2 PM CT (19 UTC)
+    - cron: '0 0 * * *'   # 7 PM CT (0 UTC next day)
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.12
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run data refresh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          CAPITAN_API_TOKEN: ${{ secrets.CAPITAN_API_TOKEN }}
+          KLAVIYO_PRIVATE_KEY: ${{ secrets.KLAVIYO_PRIVATE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_TOKEN: ${{ secrets.SHOPIFY_ADMIN_TOKEN }}
+        run: python run_data_refresh.py
