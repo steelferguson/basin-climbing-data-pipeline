@@ -68,25 +68,34 @@ def build_events_table() -> pd.DataFrame:
         return cid
 
     # =========================================================
-    # 1. Check-ins
+    # 1. Check-ins (with birthday attendee detection)
     # =========================================================
     print("\n📂 1. Check-ins...")
     df_checkins = load_s3('capitan/checkins.csv')
+    birthday_checkin_ids = set()
     if not df_checkins.empty:
         df_checkins['checkin_datetime'] = pd.to_datetime(df_checkins['checkin_datetime'], errors='coerce')
         for _, row in df_checkins.iterrows():
             dt = row['checkin_datetime']
             if pd.isna(dt):
                 continue
+
+            desc = str(row.get('entry_method_description', ''))
+            is_birthday = 'birthday' in desc.lower() or 'bday' in desc.lower()
+
             all_events.append({
                 'customer_id': str(row['customer_id']),
                 'event_date': dt.strftime('%Y-%m-%d %H:%M'),
-                'event_type': 'checkin',
-                'details': row.get('entry_method_description', ''),
+                'event_type': 'birthday_party_attendee_checkin' if is_birthday else 'checkin',
+                'details': desc,
                 'source': 'capitan',
                 'entry_method': row.get('entry_method', ''),
             })
-        print(f"  Added {len(df_checkins)} check-in events")
+
+            if is_birthday:
+                birthday_checkin_ids.add(str(row['customer_id']))
+
+        print(f"  Added {len(df_checkins)} check-in events ({len(birthday_checkin_ids)} birthday attendees)")
 
     # =========================================================
     # 2. Customer events (UUID-based — map to Capitan)
