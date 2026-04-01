@@ -303,13 +303,26 @@ def build_customer_master() -> pd.DataFrame:
                     'membership_end_date': str(row.get('end_date', '')),
                 }
 
+    # Also identify family/duo members who aren't the owner
+    # These people check in with MEM entry but aren't in owner_id
+    if not df_checkins.empty:
+        mem_checkins = df_checkins[df_checkins['entry_method'] == 'MEM']
+        # Recent MEM checkins (last 90 days) = likely active family member
+        mem_checkins_dt = pd.to_datetime(mem_checkins['checkin_datetime'], errors='coerce')
+        recent_cutoff = pd.Timestamp.now() - pd.Timedelta(days=90)
+        recent_mem = mem_checkins[mem_checkins_dt >= recent_cutoff]
+        family_member_ids = set(recent_mem['customer_id'].astype(str)) - active_ids
+        active_ids.update(family_member_ids)
+        ever_member_ids.update(family_member_ids)
+        print(f"  Family/duo members (not owner, MEM checkin): {len(family_member_ids)}")
+
     master['has_active_membership'] = master['customer_id'].isin(active_ids)
     master['ever_had_membership'] = master['customer_id'].isin(ever_member_ids)
     master['is_lapsed_member'] = master['ever_had_membership'] & ~master['has_active_membership']
     master['membership_name'] = master['customer_id'].map(lambda x: membership_info.get(x, {}).get('membership_name'))
     master['membership_start_date'] = master['customer_id'].map(lambda x: membership_info.get(x, {}).get('membership_start_date'))
 
-    print(f"  Active members: {master['has_active_membership'].sum()}")
+    print(f"  Active members (total): {master['has_active_membership'].sum()}")
     print(f"  Ever had membership: {master['ever_had_membership'].sum()}")
     print(f"  Lapsed: {master['is_lapsed_member'].sum()}")
 
