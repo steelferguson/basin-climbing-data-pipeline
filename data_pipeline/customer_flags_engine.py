@@ -523,6 +523,32 @@ class CustomerFlagsEngine:
             df_checkin_events = pd.DataFrame(checkin_events)
             print(f"   ✅ Converted {len(df_checkin_events)} checkins to events")
 
+            # 2a2. Create day_pass_purchase events for FRE and birthday EVE entries
+            # These visitors should enter the day pass journey but the flag rules
+            # only trigger on day_pass_purchase events, not raw checkins.
+            fre_bday_checkins = df_checkins[
+                (df_checkins['entry_method'] == 'FRE') |
+                ((df_checkins['entry_method'] == 'EVE') &
+                 (df_checkins['entry_method_description'].str.contains('birthday|bday', case=False, na=False)))
+            ]
+            fre_bday_events = []
+            for _, row in fre_bday_checkins.iterrows():
+                fre_bday_events.append({
+                    'customer_id': row['customer_id'],
+                    'event_type': 'day_pass_purchase',
+                    'event_date': row['checkin_datetime'],
+                    'event_data': {
+                        'entry_method_description': row.get('entry_method_description', ''),
+                        'entry_method': row.get('entry_method', ''),
+                        'checkin_id': row.get('checkin_id', ''),
+                        'source': 'fre_bday_attribution',
+                    }
+                })
+            if fre_bday_events:
+                df_fre_bday = pd.DataFrame(fre_bday_events)
+                df_checkin_events = pd.concat([df_checkin_events, df_fre_bday], ignore_index=True)
+                print(f"   ✅ Created {len(fre_bday_events)} day_pass_purchase events from FRE/birthday entries")
+
             # 2b. Create child-attributed day_pass_purchase events
             # When a child checks in with a day pass (ENT/GUE), the purchase
             # event is on the parent's account. Create an attributed purchase
@@ -540,10 +566,14 @@ class CustomerFlagsEngine:
                     str(int(float(cid))) for cid in df_family['child_customer_id'].dropna()
                 )
 
-                # Filter checkins for children with day passes
+                # Filter checkins for children with day passes, free entry, or birthday events
                 child_day_pass_checkins = df_checkins[
                     (df_checkins['customer_id'].isin(child_ids)) &
-                    (df_checkins['entry_method'].isin(['ENT', 'GUE']))
+                    (
+                        (df_checkins['entry_method'].isin(['ENT', 'GUE', 'FRE'])) |
+                        ((df_checkins['entry_method'] == 'EVE') &
+                         (df_checkins['entry_method_description'].str.contains('birthday|bday', case=False, na=False)))
+                    )
                 ]
 
                 child_purchase_events = []
