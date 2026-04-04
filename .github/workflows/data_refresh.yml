@@ -29,6 +29,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Write Firebase credentials
+        run: echo '${{ secrets.FIREBASE_CREDENTIALS }}' > firebase-credentials.json
+
       - name: Run data refresh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
