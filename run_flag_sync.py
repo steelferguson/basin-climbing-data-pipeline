@@ -3,11 +3,10 @@ Flag Evaluation & Sync Pipeline
 
 Runs customer flag evaluation and syncs to marketing platforms:
 1. Evaluates customer flagging rules (day pass conversion, membership offers, etc.)
-2. Syncs flags to Shopify as customer tags (triggers Shopify Flows)
-3. Syncs flags to Mailchimp for email campaigns
-4. Syncs birthday party hosts to Klaviyo (triggers post-party follow-up flow)
-5. Syncs birthday party attendees to Klaviyo (triggers attendee follow-up flow)
-6. Syncs day pass customers to Klaviyo for 50% off second visit offer
+2. Syncs flags to Shopify as customer tags (triggers Shopify Flows → Klaviyo)
+3. Syncs birthday party hosts to Klaviyo (triggers post-party follow-up flow)
+4. Syncs birthday party attendees to Klaviyo (triggers attendee follow-up flow)
+5. Syncs day pass customers to Klaviyo for 50% off second visit offer
 
 This is separated from data ingestion to allow faster iteration during testing.
 
@@ -57,20 +56,8 @@ def run_flag_sync():
         import traceback
         traceback.print_exc()
 
-    # 3. Sync flags to Mailchimp
-    print("3. Syncing customer flags to Mailchimp...", flush=True)
-    try:
-        from data_pipeline.sync_flags_to_mailchimp import MailchimpFlagSyncer
-        mailchimp_syncer = MailchimpFlagSyncer()
-        mailchimp_syncer.sync_flags_to_mailchimp(dry_run=False)
-        print("✅ Flags synced to Mailchimp successfully\n", flush=True)
-    except Exception as e:
-        print(f"❌ Error syncing flags to Mailchimp: {e}\n", flush=True)
-        import traceback
-        traceback.print_exc()
-
-    # 4. Sync birthday party hosts to Klaviyo (triggers post-party flow)
-    print("4. Syncing birthday party hosts to Klaviyo...", flush=True)
+    # 3. Sync birthday party hosts to Klaviyo (triggers post-party flow)
+    print("3. Syncing birthday party hosts to Klaviyo...", flush=True)
     try:
         import subprocess
         result = subprocess.run(
@@ -90,8 +77,8 @@ def run_flag_sync():
         import traceback
         traceback.print_exc()
 
-    # 5. Sync birthday party attendees to Klaviyo (triggers attendee follow-up flow)
-    print("5. Syncing birthday party attendees to Klaviyo...", flush=True)
+    # 4. Sync birthday party attendees to Klaviyo (triggers attendee follow-up flow)
+    print("4. Syncing birthday party attendees to Klaviyo...", flush=True)
     try:
         import subprocess
         result = subprocess.run(
@@ -111,8 +98,8 @@ def run_flag_sync():
         import traceback
         traceback.print_exc()
 
-    # 5b. Sync birthday check-in attendees to Klaviyo
-    print("5b. Syncing birthday check-in attendees to Klaviyo...", flush=True)
+    # 4b. Sync birthday check-in attendees to Klaviyo
+    print("4b. Syncing birthday check-in attendees to Klaviyo...", flush=True)
     try:
         from data_pipeline.sync_birthday_checkin_attendees import sync_birthday_checkin_attendees
         results = sync_birthday_checkin_attendees(days_back=7, dry_run=False)
@@ -120,8 +107,8 @@ def run_flag_sync():
     except Exception as e:
         print(f"❌ Error syncing check-in attendees: {e}\n", flush=True)
 
-    # 6. Sync day pass customers to Klaviyo for 50% off second visit offer
-    print("6. Syncing day pass customers for 50% off second visit offer...", flush=True)
+    # 5. Sync day pass customers to Klaviyo for 50% off second visit offer
+    print("5. Syncing day pass customers for 50% off second visit offer...", flush=True)
     try:
         from data_pipeline.sync_second_visit_offer_to_klaviyo import SecondVisitOfferSync
         second_visit_syncer = SecondVisitOfferSync()
