@@ -117,19 +117,26 @@ class SecondVisitOfferSync:
         second_visit_flags = df_flags[df_flags['flag_type'] == 'second_visit_offer_eligible']
         print(f"  Found {len(second_visit_flags)} customers with second_visit_offer_eligible flag")
 
-        # Load customer contact info
+        # Load customer contact info from customer_master_v2
         obj = self.s3_client.get_object(
             Bucket=self.bucket_name,
-            Key='customers/customers_master.csv'
+            Key='customers/customer_master_v2.csv'
         )
         df_customers = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
 
-        # Merge to get emails
+        # Ensure customer_id types match for merge
+        second_visit_flags['customer_id'] = second_visit_flags['customer_id'].astype(str)
+        df_customers['customer_id'] = df_customers['customer_id'].astype(str)
+
+        # Merge to get emails (v2 uses contact_email with parent fallback)
         df_merged = second_visit_flags.merge(
-            df_customers[['customer_id', 'primary_email', 'primary_phone', 'primary_name']],
+            df_customers[['customer_id', 'contact_email', 'contact_phone', 'first_name', 'last_name']],
             on='customer_id',
             how='left'
         )
+        df_merged['primary_email'] = df_merged['contact_email']
+        df_merged['primary_phone'] = df_merged['contact_phone']
+        df_merged['primary_name'] = df_merged['first_name'] + ' ' + df_merged['last_name']
 
         # Filter to those with emails
         df_with_email = df_merged[df_merged['primary_email'].notna()]

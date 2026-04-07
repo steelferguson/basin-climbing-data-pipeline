@@ -990,7 +990,7 @@ class ShopifyFlagSyncer:
                 Key=self.pending_sent_tags_key
             )
             df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
-            df['queued_at'] = pd.to_datetime(df['queued_at'])
+            df['queued_at'] = pd.to_datetime(df['queued_at'], format='mixed', utc=False)
             return df
         except self.s3_client.exceptions.NoSuchKey:
             return pd.DataFrame(columns=[
