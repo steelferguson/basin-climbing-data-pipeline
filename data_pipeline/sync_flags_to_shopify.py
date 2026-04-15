@@ -954,7 +954,7 @@ class ShopifyFlagSyncer:
 
             # Deduplicate based on customer_id, event_type, and event_date (to the minute)
             # This prevents duplicate sync events if the script is run multiple times
-            df_all['event_date_minute'] = pd.to_datetime(df_all['event_date']).dt.floor('min')
+            df_all['event_date_minute'] = pd.to_datetime(df_all['event_date'], format='mixed', utc=False).dt.floor('min')
             df_all = df_all.drop_duplicates(
                 subset=['customer_id', 'event_type', 'event_date_minute'],
                 keep='last'
