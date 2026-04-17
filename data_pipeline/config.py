@@ -165,6 +165,11 @@ revenue_category_keywords = {
     "homeschool": "Programming",  # Homeschool Climb Club
     "climb club": "Programming",  # Climb clubs
     "basin strong": "Programming",  # Basin Strong program
+    "bouldering league": "Programming",  # Bouldering League
+    "league": "Programming",  # General league
+    "ascenders": "Programming",  # Mini Ascenders
+    "intro to climbing": "Programming",  # Intro to Climbing classes
+    "intro to bouldering": "Programming",  # Intro to Bouldering
     "event": "Event Booking",
     "birthday": "Event Booking",
     "retreat": "Event Booking",
