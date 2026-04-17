@@ -513,26 +513,23 @@ def upload_new_capitan_membership_data(save_local=False):
     capitan_memberships_df = capitan_fetcher.process_membership_data(json_response)
     capitan_members_df = capitan_fetcher.process_member_data(json_response)
 
-    # Extract and save 2-week passes separately with conversion tracking
-    if 'is_2_week_pass' in capitan_memberships_df.columns:
-        df_2wk_passes = capitan_memberships_df[capitan_memberships_df['is_2_week_pass']].copy()
-        df_regular_memberships = capitan_memberships_df[~capitan_memberships_df['is_2_week_pass']].copy()
+    # Extract and save temporary passes (2-week + companion) separately with conversion tracking
+    if 'is_temporary_pass' in capitan_memberships_df.columns:
+        df_temp_passes = capitan_memberships_df[capitan_memberships_df['is_temporary_pass']].copy()
+        df_regular_memberships = capitan_memberships_df[~capitan_memberships_df['is_temporary_pass']].copy()
 
-        print(f"Found {len(df_2wk_passes)} 2-week passes")
+        print(f"Found {len(df_temp_passes)} temporary passes (2-week + companion)")
 
-        # Add conversion tracking: did this 2-week pass owner convert to a regular membership?
-        if not df_2wk_passes.empty and not df_regular_memberships.empty:
-            # Convert dates for comparison
-            df_2wk_passes['start_date'] = pd.to_datetime(df_2wk_passes['start_date'], errors='coerce')
+        # Add conversion tracking: did this temporary pass owner convert to a regular membership?
+        if not df_temp_passes.empty and not df_regular_memberships.empty:
+            df_temp_passes['start_date'] = pd.to_datetime(df_temp_passes['start_date'], errors='coerce')
             df_regular_memberships['start_date'] = pd.to_datetime(df_regular_memberships['start_date'], errors='coerce')
 
-            # For each 2-week pass owner, check if they have a regular membership that started after
             conversion_info = []
-            for _, row in df_2wk_passes.iterrows():
+            for _, row in df_temp_passes.iterrows():
                 owner_id = row['owner_id']
                 pass_start = row['start_date']
 
-                # Find regular memberships for this owner that started after the 2-week pass
                 owner_regular = df_regular_memberships[
                     (df_regular_memberships['owner_id'] == owner_id) &
                     (df_regular_memberships['start_date'] > pass_start)
@@ -552,31 +549,30 @@ def upload_new_capitan_membership_data(save_local=False):
                         'membership_converted_to': None
                     })
 
-            # Add conversion columns to 2-week passes
             conversion_df = pd.DataFrame(conversion_info)
-            df_2wk_passes = df_2wk_passes.reset_index(drop=True)
-            df_2wk_passes['converted_to_membership'] = conversion_df['converted_to_membership']
-            df_2wk_passes['conversion_date'] = conversion_df['conversion_date']
-            df_2wk_passes['membership_converted_to'] = conversion_df['membership_converted_to']
+            df_temp_passes = df_temp_passes.reset_index(drop=True)
+            df_temp_passes['converted_to_membership'] = conversion_df['converted_to_membership']
+            df_temp_passes['conversion_date'] = conversion_df['conversion_date']
+            df_temp_passes['membership_converted_to'] = conversion_df['membership_converted_to']
 
-            num_converted = df_2wk_passes['converted_to_membership'].sum()
-            print(f"  {num_converted} of {len(df_2wk_passes)} 2-week pass owners converted to regular membership")
+            num_converted = df_temp_passes['converted_to_membership'].sum()
+            print(f"  {num_converted} of {len(df_temp_passes)} temporary pass owners converted to regular membership")
 
-        # Upload 2-week passes to S3
-        uploader_2wk = upload_data.DataUploader()
-        uploader_2wk.upload_to_s3(
-            df_2wk_passes,
+        # Upload temporary passes to S3
+        uploader_temp = upload_data.DataUploader()
+        uploader_temp.upload_to_s3(
+            df_temp_passes,
             config.aws_bucket_name,
-            config.s3_path_capitan_2_week_passes,
+            config.s3_path_capitan_temporary_passes,
         )
-        print(f"Uploaded {len(df_2wk_passes)} 2-week passes to S3")
+        print(f"Uploaded {len(df_temp_passes)} temporary passes to S3")
 
-        # Filter out 2-week passes from main memberships data
+        # Filter out temporary passes from main memberships data
         capitan_memberships_df = df_regular_memberships
-        print(f"Filtered out {len(df_2wk_passes)} 2-week passes from memberships data")
+        print(f"Filtered out {len(df_temp_passes)} temporary passes from memberships data")
 
-    if 'is_2_week_pass' in capitan_members_df.columns:
-        capitan_members_df = capitan_members_df[~capitan_members_df['is_2_week_pass']].copy()
+    if 'is_temporary_pass' in capitan_members_df.columns:
+        capitan_members_df = capitan_members_df[~capitan_members_df['is_temporary_pass']].copy()
 
     membership_revenue_projection_df = capitan_fetcher.get_projection_table(
         capitan_memberships_df, months_ahead=3
@@ -1042,16 +1038,15 @@ def update_customer_master(save_local=False):
         df_memberships = uploader.convert_csv_to_df(csv_content)
         print(f"📥 Loaded {len(df_memberships)} memberships for transaction matching")
 
-        # Also load 2-week passes and combine with memberships
+        # Also load temporary passes (2-week + companion) and combine with memberships
         try:
-            csv_content_2wk = uploader.download_from_s3(config.aws_bucket_name, 'capitan/2_week_passes.csv')
-            df_2week_passes = uploader.convert_csv_to_df(csv_content_2wk)
-            if not df_2week_passes.empty:
-                # Combine 2-week passes with regular memberships for event building
-                df_memberships = pd.concat([df_memberships, df_2week_passes], ignore_index=True)
-                print(f"📥 Added {len(df_2week_passes)} 2-week passes (total: {len(df_memberships)})")
+            csv_content_temp = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_capitan_temporary_passes)
+            df_temp_passes = uploader.convert_csv_to_df(csv_content_temp)
+            if not df_temp_passes.empty:
+                df_memberships = pd.concat([df_memberships, df_temp_passes], ignore_index=True)
+                print(f"📥 Added {len(df_temp_passes)} temporary passes (total: {len(df_memberships)})")
         except Exception as e:
-            print(f"⚠️  Could not load 2-week passes: {e}")
+            print(f"⚠️  Could not load temporary passes: {e}")
     except Exception as e:
         print(f"⚠️  Could not load memberships: {e}")
 
