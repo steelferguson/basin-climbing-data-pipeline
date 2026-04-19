@@ -461,6 +461,7 @@ class CapitanDataFetcher:
                 'latest_waiver_expiration_date': customer.get('latest_waiver_expiration_date'),
                 'relations_url': customer.get('relations_url'),
                 'emergency_contacts_url': customer.get('emergency_contacts_url'),
+                'barcode': customer.get('barcode'),
                 'created_at': customer.get('created_at'),
             })
 
