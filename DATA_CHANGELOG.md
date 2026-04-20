@@ -4,6 +4,13 @@ Changes to data tables, columns, classifications, pipelines, and file paths that
 
 ---
 
+## 2026-04-18: Barcode field added to customer data
+- **Added:** `barcode` column to `capitan/customers.csv`
+- **Source:** Capitan customer API `barcode` field (e.g. `0646459200583140`)
+- **What it is:** The scannable barcode Capitan assigns to each customer for front desk check-in
+- **Used for:** Customer lookup by barcode scan, linking physical check-in to digital profile
+- **Repo:** basin-climbing-data-pipeline
+
 ## 2026-04-16: Companion passes treated as temporary passes
 - **Changed:** `is_2_week_pass` column renamed to `is_temporary_pass` across all tables
 - **Changed:** `capitan/2_week_passes.csv` renamed to `capitan/temporary_passes.csv`
