@@ -4,6 +4,22 @@ Changes to data tables, columns, classifications, pipelines, and file paths that
 
 ---
 
+## ⚠️ CRITICAL: Customer Lookup — Use customer_master_v2 ONLY
+
+**DO NOT use `customers/customers_master.csv` (old table).** It uses UUID-based customer_ids that don't match any other table. All membership data, flags, events, and transactions are keyed by Capitan numeric IDs.
+
+**Always use `customers/customer_master_v2.csv`** for customer lookup by email, name, or ID. This table has:
+- Capitan numeric `customer_id` (matches all other tables)
+- `contact_email` (with parent fallback for children)
+- `has_active_membership`, `is_lead`, `active_flags`, etc.
+
+**The old table (`customers_master.csv`) is deprecated and will be removed.**
+
+If you search by email: `customer_master_v2[customer_master_v2['contact_email'] == email]`
+If you search by name: filter on `first_name` + `last_name` columns in customer_master_v2
+
+---
+
 ## 2026-04-18: Barcode field added to customer data
 - **Added:** `barcode` column to `capitan/customers.csv`
 - **Source:** Capitan customer API `barcode` field (e.g. `0646459200583140`)
