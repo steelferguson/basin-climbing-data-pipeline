@@ -13,12 +13,22 @@ Changes to data tables, columns, classifications, pipelines, and file paths that
 - `contact_email` (with parent fallback for children)
 - `has_active_membership`, `is_lead`, `active_flags`, etc.
 
-**The old table (`customers_master.csv`) is deprecated and will be removed.**
+**The old table (`customers_master.csv`) is deprecated. It is no longer updated as of 2026-04-21.**
 
 If you search by email: `customer_master_v2[customer_master_v2['contact_email'] == email]`
 If you search by name: filter on `first_name` + `last_name` columns in customer_master_v2
 
 ---
+
+## 2026-04-21: Full migration to customer_master_v2 — old table retired
+- **Changed:** All scripts now load from `customers/customer_master_v2.csv` instead of `customers/customers_master.csv`
+- **Changed:** Pipeline no longer uploads `customers/customers_master.csv` to S3. The old file still exists but is frozen/stale.
+- **Changed:** Old customer master snapshots no longer created
+- **Added:** `config.s3_path_customers_master_v2` config variable pointing to `customers/customer_master_v2.csv`
+- **Why:** The old table used UUID-based customer_ids that didn't match any other table (flags, events, transactions all use Capitan numeric IDs). This caused an agent to look up a customer by email, get the UUID record, and miss all membership/flag data.
+- **Files migrated:** customer_events_builder, sync_to_klaviyo, pipeline_handler, birthday host notifications, mailchimp import, system_health, flag email verification, 2wk pass diagnostics, journey analysis, test_offer_tracking
+- **Impact:** Any process still reading `customers/customers_master.csv` from S3 will get stale data. Switch to `customer_master_v2.csv`.
+- **Repo:** basin-climbing-data-pipeline
 
 ## 2026-04-18: Barcode field added to customer data
 - **Added:** `barcode` column to `capitan/customers.csv`
