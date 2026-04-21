@@ -25,7 +25,7 @@ def load_system_health_data():
 
     # Load customer master (for data freshness)
     try:
-        csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customers_master)
+        csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customers_master_v2)
         data['customers'] = uploader.convert_csv_to_df(csv_content)
     except Exception as e:
         print(f"Error loading customers: {e}")
@@ -177,7 +177,7 @@ def get_data_freshness_metrics():
 
     sources = [
         {'name': 'Stripe Transactions', 's3_key': config.s3_path_combined},
-        {'name': 'Customer Master', 's3_key': config.s3_path_customers_master},
+        {'name': 'Customer Master', 's3_key': config.s3_path_customers_master_v2},
         {'name': 'Customer Flags', 's3_key': config.s3_path_customer_flags},
         {'name': 'Birthday Parties', 's3_key': 'birthday_parties/birthday_parties.csv'},
         {'name': 'Capitan Memberships', 's3_key': config.s3_path_capitan_memberships},

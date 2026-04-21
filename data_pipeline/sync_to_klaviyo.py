@@ -279,7 +279,7 @@ class KlaviyoSync:
         """
         Sync all customer profiles to Klaviyo.
 
-        Loads customers_master and customer_flags, then syncs to Klaviyo.
+        Loads customer_master_v2 and customer_flags, then syncs to Klaviyo.
 
         Returns:
             Tuple of (profiles_synced, profiles_failed)
@@ -290,11 +290,7 @@ class KlaviyoSync:
 
         # Load customer data
         print("\nLoading customer data from S3...")
-        # Try unified customer master v2 first, fall back to old
         df_customers = self._load_s3_csv('customers/customer_master_v2.csv')
-        if df_customers.empty:
-            print("   customer_master_v2 not found, falling back to old customers_master.csv")
-            df_customers = self._load_s3_csv('customers/customers_master.csv')
         df_flags = self._load_s3_csv('customers/customer_flags.csv')
         df_memberships = self._load_s3_csv('capitan/memberships.csv')
 
@@ -500,8 +496,6 @@ class KlaviyoSync:
 
         # Load customer master to get emails
         df_customers = self._load_s3_csv('customers/customer_master_v2.csv')
-        if df_customers.empty:
-            df_customers = self._load_s3_csv('customers/customers_master.csv')
         email_col = 'contact_email' if 'contact_email' in df_customers.columns else 'primary_email'
         customer_emails = dict(zip(
             df_customers['customer_id'].astype(str),

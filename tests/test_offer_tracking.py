@@ -24,7 +24,7 @@ def test_offer_tracking():
     # Load customer master and identifiers from S3
     print("\n1. Loading customer data from S3...")
     try:
-        csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customers_master)
+        csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customers_master_v2)
         df_master = uploader.convert_csv_to_df(csv_content)
         print(f"   ✅ Loaded {len(df_master)} customers")
     except Exception as e:

@@ -49,7 +49,7 @@ def main():
 
     # Load customers to get names
     print("\n=== Loading Customer Data from S3 ===")
-    obj = s3.get_object(Bucket='basin-climbing-data-prod', Key='customers/customers_master.csv')
+    obj = s3.get_object(Bucket='basin-climbing-data-prod', Key='customers/customer_master_v2.csv')
     customers_df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
     print(f"Loaded {len(customers_df)} customers")
 

@@ -85,7 +85,7 @@ def diagnose_2week_pass_journey():
             uuid_to_email[uuid] = email.lower().strip()
 
     # Build customer names
-    csv_content = uploader.download_from_s3(config.aws_bucket_name, 'customers/customers_master.csv')
+    csv_content = uploader.download_from_s3(config.aws_bucket_name, 'customers/customer_master_v2.csv')
     df_customers = uploader.convert_csv_to_df(csv_content)
     customer_to_name = {}
     for _, row in df_customers.iterrows():

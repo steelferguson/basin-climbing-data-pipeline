@@ -49,7 +49,7 @@ def build_flag_email_verification():
 
     # Load customers master (for names)
     print("\n📥 Loading customer master data...")
-    csv_content = uploader.download_from_s3(config.aws_bucket_name, 'customers/customers_master.csv')
+    csv_content = uploader.download_from_s3(config.aws_bucket_name, 'customers/customer_master_v2.csv')
     df_customers = uploader.convert_csv_to_df(csv_content)
     print(f"   Loaded {len(df_customers):,} customers")
 

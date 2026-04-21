@@ -1098,9 +1098,6 @@ def update_customer_master(save_local=False):
 
     # Save locally if requested
     if save_local:
-        if not df_master.empty:
-            df_master.to_csv('data/outputs/customers_master.csv', index=False)
-            print("✅ Saved customers_master.csv locally")
         if not df_identifiers.empty:
             df_identifiers.to_csv('data/outputs/customer_identifiers.csv', index=False)
             print("✅ Saved customer_identifiers.csv locally")
@@ -1108,14 +1105,9 @@ def update_customer_master(save_local=False):
             df_events.to_csv('data/outputs/customer_events.csv', index=False)
             print("✅ Saved customer_events.csv locally")
 
-    # Upload to S3
-    if not df_master.empty:
-        uploader.upload_to_s3(
-            df_master,
-            config.aws_bucket_name,
-            config.s3_path_customers_master,
-        )
-        print(f"✅ Uploaded customer master to S3: {config.s3_path_customers_master}")
+    # NOTE: Old customers_master.csv is no longer uploaded.
+    # customer_master_v2.csv (built by build_customer_master.py) is the primary table.
+    # The old matching output is still computed for customer_events_builder but not saved to S3.
 
     if not df_identifiers.empty:
         uploader.upload_to_s3(
@@ -1144,13 +1136,7 @@ def update_customer_master(save_local=False):
             )
             print(f"📸 Created Capitan customers snapshot")
 
-        if not df_master.empty:
-            uploader.upload_to_s3(
-                df_master,
-                config.aws_bucket_name,
-                config.s3_path_customers_master_snapshot + f'_{today.strftime("%Y-%m-%d")}',
-            )
-            print(f"📸 Created customer master snapshot")
+        # Old customer master snapshot removed — v2 snapshots handled by build_customer_master.py
 
         if not df_identifiers.empty:
             uploader.upload_to_s3(

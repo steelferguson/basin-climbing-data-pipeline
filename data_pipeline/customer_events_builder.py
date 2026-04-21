@@ -773,7 +773,7 @@ if __name__ == "__main__":
 
     # Load customer master and identifiers
     print("\nLoading customer data from S3...")
-    csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customers_master)
+    csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customers_master_v2)
     df_master = uploader.convert_csv_to_df(csv_content)
 
     csv_content = uploader.download_from_s3(config.aws_bucket_name, config.s3_path_customer_identifiers)
