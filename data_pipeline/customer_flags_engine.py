@@ -733,9 +733,149 @@ class CustomerFlagsEngine:
         except Exception as e:
             print(f"   ❌ Error saving flags: {e}")
 
+        # 6. Evaluate offers and create awards in Supabase
+        print("\n🎁 Evaluating offers...")
+        try:
+            self._evaluate_offers(df_all_events, s3_client, bucket_name)
+        except Exception as e:
+            print(f"   ⚠️  Error evaluating offers: {e}")
+            import traceback
+            traceback.print_exc()
+
         print("\n" + "="*80)
         print("✅ CUSTOMER FLAGS ENGINE COMPLETE")
         print("="*80)
+
+    def _evaluate_offers(self, df_events, s3_client, bucket_name):
+        """Evaluate Supabase offer definitions against customer data and create awards."""
+        from supabase import create_client
+
+        supabase_url = os.getenv('SUPABASE_URL')
+        supabase_key = os.getenv('SUPABASE_SERVICE_KEY')
+        if not supabase_url or not supabase_key:
+            print("   ℹ️  Supabase credentials not configured, skipping offers")
+            return
+
+        supabase = create_client(supabase_url, supabase_key)
+
+        # Load active offers
+        offers_result = supabase.table('offers').select('*').eq('active', True).execute()
+        offers = offers_result.data
+        if not offers:
+            print("   ℹ️  No active offers")
+            return
+        print(f"   📋 {len(offers)} active offers to evaluate")
+
+        # Load existing awards for cooldown checking
+        awards_result = supabase.table('offer_awards').select('offer_id, customer_id, awarded_at').execute()
+        existing_awards = awards_result.data or []
+
+        # Build cooldown lookup: {(offer_id, customer_id): latest_awarded_at}
+        award_lookup = {}
+        for a in existing_awards:
+            key = (a['offer_id'], a['customer_id'])
+            existing = award_lookup.get(key)
+            if not existing or a['awarded_at'] > existing:
+                award_lookup[key] = a['awarded_at']
+
+        # Load checkins for visit-count triggers
+        try:
+            obj = s3_client.get_object(Bucket=bucket_name, Key='capitan/checkins.csv')
+            df_checkins = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            df_checkins['checkin_datetime'] = pd.to_datetime(df_checkins['checkin_datetime'], errors='coerce')
+            df_checkins['customer_id'] = df_checkins['customer_id'].astype(str)
+        except Exception:
+            df_checkins = pd.DataFrame()
+
+        # Load customer master for names and audience filtering
+        try:
+            obj = s3_client.get_object(Bucket=bucket_name, Key='customers/customer_master_v2.csv')
+            df_cm = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+            df_cm['customer_id'] = df_cm['customer_id'].astype(str)
+            member_ids = set(df_cm[df_cm['has_active_membership'] == True]['customer_id'])
+            customer_names = dict(zip(df_cm['customer_id'], df_cm['first_name'] + ' ' + df_cm['last_name']))
+        except Exception:
+            member_ids = set()
+            customer_names = {}
+
+        now = pd.Timestamp.now()
+        total_awards = 0
+
+        for offer in offers:
+            offer_id = offer['id']
+            trigger_type = offer.get('trigger_type', '')
+            threshold = offer.get('trigger_threshold', 0)
+            window = offer.get('trigger_window', 'calendar_month')
+            audience = offer.get('trigger_audience', 'all')
+            cooldown_days = offer.get('cooldown_days', 30)
+            expiration_days = offer.get('reward_expiration_days', 30)
+            max_per_person = offer.get('max_per_person')
+
+            print(f"   🔍 {offer_id}: {trigger_type} >= {threshold} ({window})")
+
+            if trigger_type == 'visit_count' and not df_checkins.empty:
+                # Determine time window
+                if window == 'calendar_month':
+                    window_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                elif window == 'rolling_30d':
+                    window_start = now - pd.Timedelta(days=30)
+                elif window == 'rolling_7d':
+                    window_start = now - pd.Timedelta(days=7)
+                else:
+                    window_start = pd.Timestamp('2020-01-01')  # lifetime
+
+                # Count checkins per customer in window
+                window_checkins = df_checkins[df_checkins['checkin_datetime'] >= window_start]
+                visit_counts = window_checkins.groupby('customer_id').size()
+                qualifying = visit_counts[visit_counts >= threshold].index.tolist()
+
+                # Filter by audience
+                if audience == 'members_only':
+                    qualifying = [c for c in qualifying if c in member_ids]
+                elif audience == 'non_members_only':
+                    qualifying = [c for c in qualifying if c not in member_ids]
+
+                # Check cooldown and max per person
+                new_awards = []
+                for cid in qualifying:
+                    key = (offer_id, cid)
+                    last_award = award_lookup.get(key)
+
+                    # Cooldown check
+                    if last_award and cooldown_days:
+                        last_dt = pd.to_datetime(last_award)
+                        if (now - last_dt).days < cooldown_days:
+                            continue
+
+                    # Max per person check
+                    if max_per_person:
+                        person_count = sum(1 for a in existing_awards if a['offer_id'] == offer_id and a['customer_id'] == cid)
+                        if person_count >= max_per_person:
+                            continue
+
+                    new_awards.append({
+                        'offer_id': offer_id,
+                        'customer_id': cid,
+                        'customer_name': customer_names.get(cid, ''),
+                        'awarded_at': now.isoformat(),
+                        'expires_at': (now + pd.Timedelta(days=expiration_days)).isoformat(),
+                        'status': 'active',
+                        'delivery_status': 'pending',
+                    })
+
+                # Batch insert awards
+                if new_awards:
+                    for award in new_awards:
+                        try:
+                            supabase.table('offer_awards').insert(award).execute()
+                        except Exception as e:
+                            print(f"      ⚠️  Failed to create award for {award['customer_id']}: {e}")
+                    total_awards += len(new_awards)
+                    print(f"      ✅ {len(new_awards)} new awards (from {len(qualifying)} qualifying)")
+                else:
+                    print(f"      ℹ️  {len(qualifying)} qualifying, 0 new (all in cooldown or maxed)")
+            else:
+                print(f"      ℹ️  Trigger type '{trigger_type}' not yet implemented")
 
 
 def build_customer_flags(df_events: pd.DataFrame, today: datetime = None) -> pd.DataFrame:
