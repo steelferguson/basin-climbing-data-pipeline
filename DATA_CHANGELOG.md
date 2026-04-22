@@ -20,6 +20,27 @@ If you search by name: filter on `first_name` + `last_name` columns in customer_
 
 ---
 
+## 2026-04-21: Offers & Rewards system created (Supabase)
+- **New table:** `offers` — reward definitions (trigger, reward type, delivery, cooldown, messaging)
+- **New table:** `offer_awards` — individual awards per customer (status: active/redeemed/expired)
+- **Location:** Supabase (same project as crew_interactions)
+- **Access:** Use `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` from `.env`
+- **First offer:** `10_visits_guest_pass` — 10+ visits in a calendar month → free guest pass via SMS
+- **How to query:**
+  ```python
+  from supabase import create_client
+  supabase = create_client(url, key)
+  # Get all active offers
+  supabase.table('offers').select('*').eq('active', True).execute()
+  # Get awards for a customer
+  supabase.table('offer_awards').select('*, offers(*)').eq('customer_id', '1378427').execute()
+  # Get all unredeemed awards
+  supabase.table('offer_awards').select('*, offers(name)').eq('status', 'active').execute()
+  ```
+- **Schema:** See `project_notes/basin_climbing/offers_rewards_system.md` for full design
+- **Status:** Tables created, first offer defined. Flag engine integration and CRM visibility not yet built.
+- **TODO:** Build UI to view all offer logic and active awards in CRM
+
 ## 2026-04-21: Full migration to customer_master_v2 — old table retired
 - **Changed:** All scripts now load from `customers/customer_master_v2.csv` instead of `customers/customers_master.csv`
 - **Changed:** Pipeline no longer uploads `customers/customers_master.csv` to S3. The old file still exists but is frozen/stale.
