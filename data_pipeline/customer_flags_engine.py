@@ -874,8 +874,62 @@ class CustomerFlagsEngine:
                     print(f"      ✅ {len(new_awards)} new awards (from {len(qualifying)} qualifying)")
                 else:
                     print(f"      ℹ️  {len(qualifying)} qualifying, 0 new (all in cooldown or maxed)")
+
+            elif trigger_type == 'visit_milestone' and not df_checkins.empty:
+                # Cumulative visits since a start date — one-time milestone awards
+                # trigger_window stores the start date (e.g. '2026-04-01')
+                try:
+                    since_date = pd.Timestamp(window)
+                except Exception:
+                    print(f"      ⚠️  Invalid start date: {window}")
+                    continue
+
+                # Count checkins since the start date
+                milestone_checkins = df_checkins[df_checkins['checkin_datetime'] >= since_date]
+                visit_counts = milestone_checkins.groupby('customer_id').size()
+                qualifying = visit_counts[visit_counts >= threshold].index.tolist()
+
+                # Filter by audience
+                if audience == 'members_only':
+                    qualifying = [c for c in qualifying if c in member_ids]
+                elif audience == 'non_members_only':
+                    qualifying = [c for c in qualifying if c not in member_ids]
+
+                # For milestones, max_per_person=1 means one-time only
+                # Check existing awards to skip already-awarded customers
+                already_awarded = set(
+                    a['customer_id'] for a in existing_awards if a['offer_id'] == offer_id
+                )
+
+                new_awards = []
+                for cid in qualifying:
+                    if cid in already_awarded:
+                        continue
+                    new_awards.append({
+                        'offer_id': offer_id,
+                        'customer_id': cid,
+                        'customer_name': customer_names.get(cid, ''),
+                        'awarded_at': now.isoformat(),
+                        'expires_at': (now + pd.Timedelta(days=expiration_days)).isoformat(),
+                        'status': 'active',
+                        'delivery_status': 'pending',
+                    })
+
+                if new_awards:
+                    for award in new_awards:
+                        try:
+                            supabase.table('offer_awards').insert(award).execute()
+                        except Exception as e:
+                            print(f"      ⚠️  Failed to create award for {award['customer_id']}: {e}")
+                    total_awards += len(new_awards)
+                    print(f"      ✅ {len(new_awards)} new awards ({len(qualifying)} qualifying, {len(already_awarded)} already awarded)")
+                else:
+                    print(f"      ℹ️  {len(qualifying)} qualifying, {len(already_awarded)} already awarded, 0 new")
+
             else:
                 print(f"      ℹ️  Trigger type '{trigger_type}' not yet implemented")
+
+        print(f"\n   🎁 Total new awards created: {total_awards}")
 
 
 def build_customer_flags(df_events: pd.DataFrame, today: datetime = None) -> pd.DataFrame:
