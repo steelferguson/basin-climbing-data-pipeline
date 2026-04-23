@@ -96,6 +96,10 @@ class ShopifyFlagSyncer:
             # Day pass → 2-week offer (all day pass visitors go here)
             'first_time_day_pass_2wk_offer': 'RX9TsQ',  # Day Pass - 2 Week Offer
             'second_visit_offer_eligible': 'RX9TsQ',    # Also goes to 2 Week Offer (AB test removed)
+            # Child variants → same lists (email goes to parent with "your child" messaging)
+            'child_first_time_day_pass_2wk_offer': 'RX9TsQ',
+            'child_second_visit_offer_eligible': 'RX9TsQ',
+            'child_2_week_pass_purchase': 'VxZEtN',
             # 2-week pass → membership
             '2_week_pass_purchase': 'VxZEtN',  # 2 Week Pass - Membership Offer
             # New members
