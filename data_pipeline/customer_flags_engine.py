@@ -523,17 +523,18 @@ class CustomerFlagsEngine:
             df_checkin_events = pd.DataFrame(checkin_events)
             print(f"   ✅ Converted {len(df_checkin_events)} checkins to events")
 
-            # 2a2. Create day_pass_purchase events for FRE and birthday EVE entries
-            # These visitors should enter the day pass journey but the flag rules
-            # only trigger on day_pass_purchase events, not raw checkins.
-            fre_bday_checkins = df_checkins[
-                (df_checkins['entry_method'] == 'FRE') |
+            # 2a2. Create day_pass_purchase events for ALL non-member checkins
+            # Every non-member who checks in (ENT, GUE, FRE, birthday EVE) should
+            # get a day_pass_purchase event so flag rules can fire.
+            # MEM entries are members, non-birthday EVE are programs — both excluded.
+            non_member_checkins = df_checkins[
+                (df_checkins['entry_method'].isin(['ENT', 'GUE', 'FRE'])) |
                 ((df_checkins['entry_method'] == 'EVE') &
                  (df_checkins['entry_method_description'].str.contains('birthday|bday', case=False, na=False)))
             ]
-            fre_bday_events = []
-            for _, row in fre_bday_checkins.iterrows():
-                fre_bday_events.append({
+            non_member_events = []
+            for _, row in non_member_checkins.iterrows():
+                non_member_events.append({
                     'customer_id': row['customer_id'],
                     'event_type': 'day_pass_purchase',
                     'event_date': row['checkin_datetime'],
@@ -541,13 +542,13 @@ class CustomerFlagsEngine:
                         'entry_method_description': row.get('entry_method_description', ''),
                         'entry_method': row.get('entry_method', ''),
                         'checkin_id': row.get('checkin_id', ''),
-                        'source': 'fre_bday_attribution',
+                        'source': 'checkin_attribution',
                     }
                 })
-            if fre_bday_events:
-                df_fre_bday = pd.DataFrame(fre_bday_events)
-                df_checkin_events = pd.concat([df_checkin_events, df_fre_bday], ignore_index=True)
-                print(f"   ✅ Created {len(fre_bday_events)} day_pass_purchase events from FRE/birthday entries")
+            if non_member_events:
+                df_non_member = pd.DataFrame(non_member_events)
+                df_checkin_events = pd.concat([df_checkin_events, df_non_member], ignore_index=True)
+                print(f"   ✅ Created {len(non_member_events)} day_pass_purchase events from non-member checkins")
 
             # 2b. Create child-attributed day_pass_purchase events
             # When a child checks in with a day pass (ENT/GUE), the purchase
