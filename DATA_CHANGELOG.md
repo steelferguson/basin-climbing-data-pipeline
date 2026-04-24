@@ -20,6 +20,13 @@ If you search by name: filter on `first_name` + `last_name` columns in customer_
 
 ---
 
+## 2026-04-23: Child flag variants now mapped to Klaviyo lists
+- **Added:** `child_first_time_day_pass_2wk_offer` → RX9TsQ, `child_second_visit_offer_eligible` → RX9TsQ, `child_2_week_pass_purchase` → VxZEtN
+- **What was broken:** When a child checked in without their own email, the flag engine correctly created `child_` prefix flags and resolved the parent's email via `contact_email`. But the flag sync skipped these flags because they weren't in the `klaviyo_flag_list_map`. The flags were created but never pushed to Klaviyo.
+- **Impact:** 95 child flags across 43 children were sitting unfired. 31 unique parent emails will now receive flow emails (day pass → 2-week offer, second visit offer).
+- **Fix:** Added child flag variants to the same Klaviyo lists as their parent counterparts. Email goes to the parent's address (already resolved by `contact_email` in customer_master_v2).
+- **Repo:** basin-climbing-data-pipeline
+
 ## 2026-04-21: Offers & Rewards system created (Supabase)
 - **New table:** `offers` — reward definitions (trigger, reward type, delivery, cooldown, messaging)
 - **New table:** `offer_awards` — individual awards per customer (status: active/redeemed/expired)
